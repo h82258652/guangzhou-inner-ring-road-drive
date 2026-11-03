@@ -108,8 +108,9 @@ export class Signs {
     return { spec: { kind: 'camera', edge: e.id, s, line: e.line }, group: g, faces, pos: g.position.clone(), loaded: false };
   }
 
-  private exitInfo(line: LineId | null, code?: string): ExitFile | undefined {
-    return this.net.exits.find((x) => x.line === line && x.code === code);
+  private exitInfo(spec: SignFile): ExitFile | undefined {
+    if (spec.exitEdge !== undefined) return this.net.exits.find((x) => x.edge === spec.exitEdge);
+    return this.net.exits.find((x) => x.line === spec.line && x.code === spec.exitCode);
   }
 
   private create(spec: SignFile, e: Edge, f: ReturnType<typeof newFrame>): SignInstance | null {
@@ -153,7 +154,7 @@ export class Signs {
     switch (spec.kind) {
       case 'exit-advance':
       case 'exit-now': {
-        const x = this.exitInfo(line, spec.exitCode);
+        const x = this.exitInfo(spec);
         if (!x) return null;
         gantry(9.0);
         const w = 8.2;
@@ -170,7 +171,7 @@ export class Signs {
         break;
       }
       case 'exit-gore': {
-        const x = this.exitInfo(line, spec.exitCode);
+        const x = this.exitInfo(spec);
         if (!x) return null;
         const post = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 3.2, 6), this.metal);
         const z = x.side === 'right' ? br + 0.7 : bl - 0.7;
@@ -338,12 +339,15 @@ function arrow(g: CanvasRenderingContext2D, x: number, y: number, size: number, 
 function drawExitSign(g: CanvasRenderingContext2D, W: number, H: number, x: ExitFile, dist: string | null, right: boolean) {
   frame(g, W, H, GREEN);
   const u = H / 10;
-  // exit number tab
-  g.fillStyle = '#fff';
-  g.fillRect(W * 0.04, u * 0.6, W * 0.17, u * 1.9);
-  text(g, x.code || '出口', W * 0.125, u * 1.6, u * 1.45, GREEN, 'center');
-  text(g, '出口', W * 0.27, u * 1.55, u * 1.2, '#fff');
-  text(g, 'EXIT', W * 0.27 + u * 2.7, u * 1.6, u * 0.9, '#fff');
+  // exit number tab (ramps without a number only say "出口 EXIT")
+  const tx = x.code ? W * 0.27 : W * 0.05;
+  if (x.code) {
+    g.fillStyle = '#fff';
+    g.fillRect(W * 0.04, u * 0.6, W * 0.17, u * 1.9);
+    text(g, x.code, W * 0.125, u * 1.6, u * 1.45, GREEN, 'center');
+  }
+  text(g, '出口', tx, u * 1.55, u * 1.2, '#fff');
+  text(g, 'EXIT', tx + u * 2.7, u * 1.6, u * 0.9, '#fff');
   // destinations
   let yy = u * 4.0;
   x.names.slice(0, 2).forEach((n, k) => {

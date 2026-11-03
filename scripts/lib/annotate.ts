@@ -200,16 +200,19 @@ interface ExitDetect {
   firstWay: number;
 }
 
+/** "内环路-增槎路放射线" -> "增槎路放射线", "人民路高架西堤二马路出口" -> "人民路高架西堤二马路" */
+const destName = (name: string) => name.replace(/^内环路[-－—]/, '').replace(/(出口|入口)$/, '');
+
 function terminalName(net: Network, nodeId: number, roads: GroundRoad[], byNode: Map<number, GroundRoad[]>, viaEdge: Edge): string {
   const direct = (byNode.get(nodeId) ?? []).filter((r) => r.name);
   if (direct.length) {
     direct.sort((a, b) => (MAJOR.has(b.highway) ? 1 : 0) - (MAJOR.has(a.highway) ? 1 : 0));
-    return direct[0].name;
+    return destName(direct[0].name);
   }
   // last named way of the chain (e.g. a radial expressway)
   for (let k = viaEdge.chain.length - 1; k >= 0; k--) {
     const nm = viaEdge.chain[k].way.name;
-    if (nm && !RING_NAMES.has(nm)) return nm;
+    if (nm && !RING_NAMES.has(nm)) return destName(nm);
   }
   const p = net.nodes.get(nodeId)!.p;
   let best = 60;
@@ -222,17 +225,32 @@ function terminalName(net: Network, nodeId: number, roads: GroundRoad[], byNode:
       name = r.name;
     }
   }
-  return name;
+  return destName(name);
 }
 
 export function detectExitsEntrances(net: Network, roads: GroundRoad[]) {
   const byNode = new Map<number, GroundRoad[]>();
-  for (const r of roads)
+  const index = (r: GroundRoad) => {
     for (const n of r.nodes) {
       let a = byNode.get(n);
       if (!a) byNode.set(n, (a = []));
       a.push(r);
     }
+  };
+  roads.forEach(index);
+  // ramps can also end on named expressways and radials (e.g. 增槎路), which are not ground roads
+  const named = [...roads];
+  for (const e of loadCache('expressways.json')) {
+    if (e.type !== 'way') continue;
+    const w = e as OsmWay;
+    const name = w.tags?.name ?? '';
+    const hw = w.tags?.highway ?? '';
+    if (!name || RING_NAMES.has(name) || hw.endsWith('_link')) continue;
+    const r: GroundRoad = { id: w.id, name, highway: hw, nodes: w.nodes ?? [], pts: w.geometry ? geomToXZ(w.geometry) : [] };
+    index(r);
+    if (r.pts.length >= 2) named.push(r);
+  }
+  roads = named;
   const exits: ExitDetect[] = [];
   const entrances: EntranceFile[] = [];
   for (const att of net.attachments) {
@@ -317,7 +335,7 @@ export interface CuratedExit {
   namesEn: string[];
   /** keywords used for automatic matching against terminal street names */
   match: string[];
-  /** numbered but not open to traffic (e.g. A5, reserved for the Ruyifang radial) */
+  /** code '' marks a ramp without an exit number; closed = numbered but not open to traffic (e.g. A5, reserved for the Ruyifang radial) */
   closed?: boolean;
   note?: string;
 }
@@ -410,14 +428,14 @@ export function placeSigns(net: Network, exits: ExitFile[], entrances: EntranceF
       for (const dist of [1000, 500]) {
         if (dist > gapPrev - 120) continue;
         const loc = locateOnLine(net, line, x.s - dist);
-        signs.push({ kind: 'exit-advance', edge: loc.edge.id, s: loc.s, line, exitCode: x.code, distanceText: dist >= 1000 ? '1 km' : `${dist} m` });
+        signs.push({ kind: 'exit-advance', edge: loc.edge.id, s: loc.s, line, exitCode: x.code, exitEdge: x.edge, distanceText: dist >= 1000 ? '1 km' : `${dist} m` });
       }
       // gantry at the start of the diverge taper
       const loc = locateOnLine(net, line, x.s - 30);
-      signs.push({ kind: 'exit-now', edge: loc.edge.id, s: loc.s, line, exitCode: x.code });
+      signs.push({ kind: 'exit-now', edge: loc.edge.id, s: loc.s, line, exitCode: x.code, exitEdge: x.edge });
       // gore sign on the ramp
       const ramp = net.edges[x.edge];
-      signs.push({ kind: 'exit-gore', edge: ramp.id, s: Math.min(ramp.length * 0.5, 110), line, exitCode: x.code });
+      signs.push({ kind: 'exit-gore', edge: ramp.id, s: Math.min(ramp.length * 0.5, 110), line, exitCode: x.code, exitEdge: x.edge });
     }
     // confirmation + speed limit signs after each entrance
     for (const en of entrances.filter((e) => e.line === line)) {

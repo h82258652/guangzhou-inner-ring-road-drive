@@ -58,20 +58,34 @@ describe('road network data', () => {
     expect(net.entrances.filter((e) => e.line === 'A').length).toBeGreaterThanOrEqual(12);
   });
 
-  it('numbers exits in driving order; A5 (Ruyifang radial) is not open yet', () => {
-    for (const line of ['A', 'B'] as LineId[]) {
-      const nums = net.exits
-        .filter((x) => x.line === line)
+  it('numbers exits as on the real road: A1–A19 without A5, B1–B19, in driving order', () => {
+    const codes = (line: LineId) =>
+      net.exits
+        .filter((x) => x.line === line && x.code)
         .sort((a, b) => a.s - b.s)
         .map((x) => Number(x.code.slice(1)));
-      for (let k = 1; k < nums.length; k++) expect(nums[k]).toBeGreaterThan(nums[k - 1]);
+    for (const line of ['A', 'B'] as LineId[]) {
+      const nums = codes(line);
+      // increasing around the loop: exactly one wrap from the last number back to the first
+      const wraps = nums.filter((n, k) => n < nums[(k - 1 + nums.length) % nums.length]).length;
+      expect(wraps).toBe(1);
+      expect(new Set(nums).size).toBe(nums.length);
     }
-    const a = (code: string) => net.exits.find((x) => x.code === code);
-    expect(a('A5')).toBeUndefined();
-    // A6 leaves on the left towards Huangsha Avenue / the Pearl River Tunnel
-    expect(a('A6')?.side).toBe('left');
-    expect(a('A6')!.names).toContain('珠江隧道');
-    expect(a('B15')!.names).toContain('珠江隧道');
+    expect([...codes('A')].sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
+    expect([...codes('B')].sort((a, b) => a - b)).toEqual(Array.from({ length: 19 }, (_, k) => k + 1));
+    const x = (code: string) => net.exits.find((e) => e.code === code)!;
+    // A5 (Ruyifang radial) is not open yet; A6 leaves on the left towards Huangsha Avenue / the Pearl River Tunnel
+    expect(net.exits.find((e) => e.code === 'A5')).toBeUndefined();
+    expect(x('A6').side).toBe('left');
+    expect(x('A6').names).toContain('珠江隧道');
+    expect(x('B16').names).toContain('珠江隧道');
+    // north-west corner of the B line: 增槎路 (left) before 东风西路, then 环市西路 at 西场
+    expect(x('B18').names[0]).toBe('增槎路');
+    expect(x('B18').side).toBe('left');
+    expect(x('B19').names[0]).toBe('东风西路');
+    expect(x('B1').names[0]).toBe('环市西路');
+    // the ramp at the north end of 江湾大桥 has no exit number
+    expect(net.exits.filter((e) => !e.code).map((e) => e.names[0])).toEqual(['大沙头路']);
   });
 
   it('speed limits follow the 60 km/h rule with lower limits on curves and ramps', () => {

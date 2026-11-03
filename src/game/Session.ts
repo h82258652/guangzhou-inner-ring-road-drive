@@ -164,7 +164,7 @@ export class Session {
       if (x && this.onExitRamp !== x) {
         this.onExitRamp = x;
         const isDest = this.destination && x === this.destination;
-        ev.push({ type: 'toast', text: `驶入 ${x.code} 出口匝道 · ${x.names.join(' / ')}`, kind: isDest || !this.destination ? 'info' : 'warn' });
+        ev.push({ type: 'toast', text: `驶入${x.code ? ` ${x.code} ` : ''}出口匝道 · ${x.names.join(' / ')}`, kind: isDest || !this.destination ? 'info' : 'warn' });
       }
     }
     if (p.terminal) {
@@ -178,7 +178,7 @@ export class Session {
         type: 'end',
         end: {
           reason: done ? 'trip-done' : 'exit',
-          title: done ? `行程完成：到达 ${exit!.code} ${exit!.names[0]}` : `已驶离内环路${exit ? `：${exit.code} ${exit.names[0]}` : ''}`,
+          title: done ? `行程完成：到达 ${exit!.code} ${exit!.names[0]}` : `已驶离内环路${exit ? `：${[exit.code, exit.names[0]].filter(Boolean).join(' ')}` : ''}`,
           exit: exit ?? null,
           terminalName: name,
         },

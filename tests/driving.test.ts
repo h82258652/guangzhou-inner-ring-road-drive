@@ -72,7 +72,8 @@ describe('autopilot on the network', () => {
 
   it('can take exit ramps to their end', () => {
     const tested: string[] = [];
-    for (const x of net.exits.filter((xx) => xx.code).slice(0, 38)) {
+    const label = (xx: (typeof net.exits)[number]) => xx.code || `${xx.names[0]}(${xx.line})`;
+    for (const x of net.exits) {
       const ramp = net.edges[x.edge];
       const through = ramp.pred[0].succ.find((n) => n.kind === 'main' && n.line === x.line)!;
       // start 200 m before the diverge in the outer lane, then steer into the ramp lane
@@ -116,11 +117,10 @@ describe('autopilot on the network', () => {
           if (past > 500 && past < L / 2) break;
         }
       }
-      if (reachedRamp && ap.tracker.terminal) tested.push(x.code);
+      if (reachedRamp && ap.tracker.terminal) tested.push(label(x));
     }
-    // every numbered exit can be taken to the end of its ramp
-    const all = net.exits.filter((xx) => xx.code).map((xx) => xx.code);
-    expect(all.filter((c) => !tested.includes(c))).toEqual([]);
+    // every exit (numbered or not) can be taken to the end of its ramp
+    expect(net.exits.map(label).filter((c) => !tested.includes(c))).toEqual([]);
   }, 120000);
 
   it('can merge onto the line from every entrance ramp', () => {

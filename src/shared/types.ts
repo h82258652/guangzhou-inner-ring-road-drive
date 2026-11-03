@@ -103,6 +103,8 @@ export interface SignFile {
   s: number;
   line: LineId | null;
   exitCode?: string;
+  /** ramp edge of the exit the sign refers to (also identifies exits without a number) */
+  exitEdge?: number;
   distanceText?: string;
   speed?: number;
   text?: string[];

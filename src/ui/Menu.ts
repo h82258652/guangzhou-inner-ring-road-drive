@@ -53,7 +53,7 @@ export class Menu {
     const o = this.settings.options;
     const starts = startPoints(this.net, o.line);
     if (!starts.find((s) => s.id === o.start)) o.start = starts[0].id;
-    const exits = this.net.exits.filter((x) => x.line === o.line && x.code);
+    const exits = this.net.exits.filter((x) => x.line === o.line && x.code).sort((a, b) => Number(a.code.slice(1)) - Number(b.code.slice(1)));
     if (!exits.find((x) => x.code === o.destination)) o.destination = exits[Math.min(6, exits.length - 1)]?.code ?? '';
     this.el.innerHTML = `
       <div class="card">
