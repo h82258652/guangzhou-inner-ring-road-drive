@@ -1,0 +1,31 @@
+{
+  "name": "guangzhou-inner-ring-road-drive",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A realistic web 3D driving game on Guangzhou Inner Ring Road (A line & B line), built from OpenStreetMap data.",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "data:fetch": "tsx scripts/fetch-osm.ts",
+    "data:build": "tsx scripts/build-data.ts",
+    "assets": "tsx scripts/fetch-assets.ts",
+    "data": "npm run data:fetch && npm run data:build"
+  },
+  "dependencies": {
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/three": "^0.186.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^4.1.12"
+  }
+}
+
