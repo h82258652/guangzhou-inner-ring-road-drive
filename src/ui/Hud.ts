@@ -13,6 +13,7 @@ export interface HudState {
   guidance: string | null;
   stats: string;
   signal: -1 | 0 | 1;
+  hazard: boolean;
   fps: number;
   lightsOn: boolean;
   camName: string;
@@ -112,8 +113,8 @@ export class Hud {
     this.blink += dt;
     const on = Math.floor(this.blink * 2.6) % 2 === 0;
     const spans = this.signalsEl.querySelectorAll('span');
-    spans[0].classList.toggle('on', s.signal === -1 && on);
-    spans[1].classList.toggle('on', s.signal === 1 && on);
+    spans[0].classList.toggle('on', (s.signal === -1 || s.hazard) && on);
+    spans[1].classList.toggle('on', (s.signal === 1 || s.hazard) && on);
     this.fpsEl.textContent = `${Math.round(s.fps)} FPS · ${s.camName}${s.lightsOn ? ' · 大灯开' : ''}`;
   }
 

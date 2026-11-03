@@ -2,11 +2,12 @@
  * Traffic AI on the inner ring (both lines) and its ramps: Intelligent Driver
  * Model car following, MOBIL-style lane changes, mandatory lane changes for
  * exits, gap-accepting merges from entrance ramps, spawning around the player
- * and instanced rendering of several vehicle types with brake/head lights.
+ * and instanced rendering of several vehicle types with brake/head lights,
+ * turn indicators (signal before changing lanes) and hazard lights after a crash.
  */
 import * as THREE from 'three';
 import { type Edge, type RoadNetwork, newFrame, newProjection } from '../road/Network';
-import { buildVehicleGeometry, PAINT_COLORS, plateAtlas, TAXI_COLOR, VEHICLES, type VehicleKind } from '../vehicle/CarModel';
+import { buildVehicleGeometry, indicatorMaterial, PAINT_COLORS, plateAtlas, TAXI_COLOR, VEHICLES, type VehicleKind } from '../vehicle/CarModel';
 import { clamp, mulberry32 } from '../shared/math';
 import type { ExitFile, LineId } from '../shared/types';
 
@@ -51,6 +52,17 @@ export interface Car {
   heading: number;
   alive: boolean;
   bumped: number;
+  /** turn indicator: -1 left, 1 right, 0 off */
+  signal: number;
+  sigHold: number;
+  /** most drivers indicate; some do not */
+  indicates: boolean;
+  /** lane change waiting for the indicator to flash first (lateral target, timer, retries) */
+  prepD: number | null;
+  prepT: number;
+  prepTries: number;
+  /** hazard lights after a collision (seconds left) */
+  hazard: number;
 }
 
 export interface PlayerProxy {
@@ -71,7 +83,17 @@ export class Traffic {
   density: Density = 'normal';
   private nextId = 1;
   private rnd = mulberry32(42);
-  private meshes: { body: THREE.InstancedMesh; trim: THREE.InstancedMesh; head: THREE.InstancedMesh; tail: THREE.InstancedMesh; plate: THREE.InstancedMesh; len: number; width: number }[] = [];
+  private meshes: {
+    body: THREE.InstancedMesh;
+    trim: THREE.InstancedMesh;
+    head: THREE.InstancedMesh;
+    tail: THREE.InstancedMesh;
+    ind: THREE.InstancedMesh;
+    plate: THREE.InstancedMesh;
+    len: number;
+    width: number;
+  }[] = [];
+  private time = 0;
   private buckets = new Map<number, (Car | PlayerProxy)[]>();
   private spawnTimer = 0;
   private f = newFrame();
@@ -88,6 +110,7 @@ export class Traffic {
     const trim = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.4, metalness: 0.3 });
     const head = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
     const tail = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
+    const indMat = indicatorMaterial('instanced').material;
     const plateMat = new THREE.MeshBasicMaterial({ map: atlas.tex });
     plateMat.onBeforeCompile = (shader) => {
       shader.vertexShader = shader.vertexShader
@@ -106,6 +129,8 @@ export class Traffic {
       };
       const plateGeo = g.plate.clone();
       plateGeo.setAttribute('aPlate', new THREE.InstancedBufferAttribute(new Float32Array(MAX_PER_KIND * 2), 2));
+      const indGeo = g.ind.clone();
+      indGeo.setAttribute('aInd', new THREE.InstancedBufferAttribute(new Float32Array(MAX_PER_KIND * 2), 2));
       const body = mk(g.body, paint, true);
       body.castShadow = true;
       const trimM = mk(g.trim, trim, false);
@@ -115,6 +140,7 @@ export class Traffic {
         trim: trimM,
         head: mk(g.head, head, true),
         tail: mk(g.tail, tail, true),
+        ind: mk(indGeo, indMat, false),
         plate: mk(plateGeo, plateMat, false),
         len: g.params.length,
         width: g.params.width,
@@ -168,6 +194,13 @@ export class Traffic {
       heading: 0,
       alive: true,
       bumped: 0,
+      signal: 0,
+      sigHold: 0,
+      indicates: this.rnd() < 0.88,
+      prepD: null,
+      prepT: 0,
+      prepTries: 0,
+      hazard: 0,
     };
     this.planExit(car);
     return car;
@@ -319,6 +352,7 @@ export class Traffic {
 
   update(dt: number, player: PlayerProxy | null, focus: THREE.Vector3) {
     if (!this.enabled) return;
+    this.time += dt;
     this.bucketize(player);
     const half = (c: Car) => c.width / 2;
     for (const car of this.cars) {
@@ -342,11 +376,22 @@ export class Traffic {
       car.v = Math.max(0, car.v + a * dt);
       car.s += car.v * dt;
 
-      // lane changes
+      // lane changes: indicate first, then move if the gap is still safe
       car.lcTimer -= dt;
+      if (car.prepD !== null) {
+        car.prepT -= dt;
+        if (car.prepT <= 0) {
+          if (this.safeChange(car, car.prepD, 3.5)) {
+            car.dTarget = car.prepD;
+            car.prepD = null;
+          } else if (++car.prepTries > (car.exit ? 14 : 3)) car.prepD = null;
+          else car.prepT = 0.5;
+        }
+      }
       this.laneLogic(car, dt);
       const latRate = 1.1 * dt;
       car.d += clamp(car.dTarget - car.d, -latRate, latRate);
+      this.updateIndicators(car, dt);
 
       // open side transfer (exits / merges)
       const i = car.edge.idx(car.s);
@@ -365,6 +410,7 @@ export class Traffic {
         const fr = car.edge.frame(car.edge.length, car.d, this.f);
         nx.project(fr.x, fr.z, car.s, this.p, 12);
         car.edge = nx;
+        if (car.prepD !== null) car.prepD += this.p.d - car.d;
         car.d = this.p.d;
         car.dTarget = clamp(car.dTarget, nx.blAt(car.s) + car.width / 2, nx.brAt(car.s) - car.width / 2);
         if (nx.kind === 'main' && (!car.exit || car.exit.line !== nx.line)) this.planExit(car);
@@ -435,16 +481,14 @@ export class Traffic {
         else if (dist < L - 260) car.exit = null;
         return;
       }
-      if (dist < 650 && car.lcTimer <= 0 && curLane !== wantLane) {
+      if (dist < 650 && car.lcTimer <= 0 && curLane !== wantLane && car.prepD === null) {
         const dir = wantLane > curLane ? 1 : -1;
-        if (this.safeChange(car, laneCenter(curLane + dir), 3.5)) {
-          car.dTarget = laneCenter(curLane + dir);
-          car.lcTimer = 2.5;
-        } else car.lcTimer = 0.5;
+        this.prepareChange(car, laneCenter(curLane + dir), 0.9);
+        car.lcTimer = 2.5 + car.prepT;
       }
       if (dist < 650) return;
     }
-    if (car.lcTimer > 0 || Math.abs(car.d - car.dTarget) > 0.3) return;
+    if (car.lcTimer > 0 || car.prepD !== null || Math.abs(car.d - car.dTarget) > 0.3) return;
     car.lcTimer = 1.5 + this.rnd() * 2.5;
     // discretionary MOBIL
     const curLead = this.leader(car, laneCenter(curLane), car.width / 2);
@@ -466,9 +510,52 @@ export class Traffic {
         best = k;
       }
     }
-    if (best >= 0) car.dTarget = laneCenter(best);
+    if (best >= 0) this.prepareChange(car, laneCenter(best), 1.0);
     else if (Math.abs(car.dTarget - laneCenter(curLane)) > 0.05) car.dTarget = laneCenter(curLane);
     void lw;
+  }
+
+  /** Queue a lane change; drivers who indicate flash for a moment before moving over. */
+  private prepareChange(car: Car, dTarget: number, minT: number) {
+    car.prepD = dTarget;
+    car.prepT = car.indicates ? minT + this.rnd() * 1.1 : 0.2;
+    car.prepTries = 0;
+  }
+
+  private updateIndicators(car: Car, dt: number) {
+    let sig = 0;
+    if (car.prepD !== null) sig = Math.sign(car.prepD - car.d);
+    else if (Math.abs(car.dTarget - car.d) > 0.8) sig = Math.sign(car.dTarget - car.d);
+    else sig = this.intentSignal(car);
+    if (!car.indicates) sig = 0;
+    if (sig !== 0) {
+      car.signal = sig;
+      car.sigHold = 0.8;
+    } else if (car.sigHold > 0) {
+      car.sigHold -= dt;
+      if (car.sigHold <= 0) car.signal = 0;
+    }
+    if (car.bumped > 0) car.hazard = 8;
+    else if (car.hazard > 0) car.hazard -= dt;
+  }
+
+  /** Indicate towards a planned exit or towards the main line while merging from an entrance ramp. */
+  private intentSignal(car: Car): number {
+    const e = car.edge;
+    if (car.exit && e.kind === 'main' && e.line) {
+      const L = this.net.lines[e.line].length;
+      const dist = (((car.exit.s - this.net.lineS(e, car.s)!) % L) + L) % L;
+      if (dist < 280 || dist > L - 150) return car.exit.side === 'right' ? 1 : -1;
+      return 0;
+    }
+    if (e.kind === 'ramp') {
+      for (const ahead of [0, 50, 110]) {
+        const i = e.idx(Math.min(e.length, car.s + ahead));
+        if (e.ol[i] >= 0 && this.net.edges[e.ol[i]].kind === 'main') return -1;
+        if (e.or[i] >= 0 && this.net.edges[e.or[i]].kind === 'main') return 1;
+      }
+    }
+    return 0;
   }
 
   private leaderAt(edge: Edge, s: number, d: number, car: Car): { gap: number; v: number } | null {
@@ -515,6 +602,7 @@ export class Traffic {
     const lanes = Math.max(1, Math.round(n.lanesAt(car.s)));
     const k = clamp(n.laneIndex(car.s, car.d), 0, lanes - 1);
     car.dTarget = n.laneCenter(car.s, k);
+    car.prepD = null;
     if (n.kind === 'main') this.planExit(car);
     else car.exit = null;
   }
@@ -623,7 +711,11 @@ export class Traffic {
       ms.trim.setMatrixAt(i, m);
       ms.head.setMatrixAt(i, m);
       ms.tail.setMatrixAt(i, m);
+      ms.ind.setMatrixAt(i, m);
       ms.plate.setMatrixAt(i, m);
+      const flash = Math.floor((this.time + car.id * 0.37) * 2.6) % 2 === 0 ? 1 : 0;
+      const ia = ms.ind.geometry.getAttribute('aInd') as THREE.InstancedBufferAttribute;
+      ia.setXY(i, car.hazard > 0 || car.signal < 0 ? flash : 0, car.hazard > 0 || car.signal > 0 ? flash : 0);
       ms.body.setColorAt(i, car.color);
       const braking = car.acc < -1.2 || car.v < 0.5;
       headC.setRGB(1, 1, 0.95).multiplyScalar(night > 0.4 ? 2.6 : 0.7);
@@ -635,12 +727,13 @@ export class Traffic {
       pa.setXY(i, car.plate % 8, this.plateRows - 1 - Math.floor(car.plate / 8));
     }
     this.meshes.forEach((ms, k) => {
-      for (const im of [ms.body, ms.trim, ms.head, ms.tail, ms.plate]) {
+      for (const im of [ms.body, ms.trim, ms.head, ms.tail, ms.ind, ms.plate]) {
         im.count = counts[k];
         im.instanceMatrix.needsUpdate = true;
         if (im.instanceColor) im.instanceColor.needsUpdate = true;
       }
       (ms.plate.geometry.getAttribute('aPlate') as THREE.InstancedBufferAttribute).needsUpdate = true;
+      (ms.ind.geometry.getAttribute('aInd') as THREE.InstancedBufferAttribute).needsUpdate = true;
     });
   }
 }

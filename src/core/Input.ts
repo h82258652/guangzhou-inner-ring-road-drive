@@ -2,7 +2,7 @@
 import { clamp } from '../shared/math';
 import type { Controls } from '../vehicle/Dynamics';
 
-export type InputAction = 'camera' | 'pause' | 'horn' | 'lights' | 'reset' | 'signalLeft' | 'signalRight' | 'map' | 'lookBack' | 'hud';
+export type InputAction = 'camera' | 'pause' | 'horn' | 'lights' | 'reset' | 'signalLeft' | 'signalRight' | 'hazard' | 'map' | 'lookBack' | 'hud';
 
 export class Input {
   private keys = new Set<string>();
@@ -36,6 +36,7 @@ export class Input {
       KeyR: 'reset',
       KeyQ: 'signalLeft',
       KeyE: 'signalRight',
+      KeyX: 'hazard',
       KeyM: 'map',
       KeyH: 'hud',
     };
@@ -89,6 +90,7 @@ export class Input {
       edge(1, 'reset');
       edge(14, 'signalLeft');
       edge(15, 'signalRight');
+      edge(13, 'hazard');
       if (btn(2)) this.horn = true;
       this.gpPrev = gp.buttons.map((b) => b.pressed);
       if (btn(0)) brake = Math.max(brake, 0);

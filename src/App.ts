@@ -477,6 +477,10 @@ export class App {
     if (input.consume('map')) this.minimap.toggle();
     if (input.consume('signalLeft')) session.toggleSignal(-1);
     if (input.consume('signalRight')) session.toggleSignal(1);
+    if (input.consume('hazard')) {
+      player.hazard = !player.hazard;
+      this.hud.toast(player.hazard ? '危险报警闪光灯（双闪）开启' : '双闪关闭', 'info', 1200);
+    }
     if (input.consume('hud')) this.hud.el.classList.toggle('hidden');
     if (input.consume('reset')) this.resetToLane();
 
@@ -573,6 +577,7 @@ export class App {
         guidance: session.guidance(t.edge, t.s, t.d),
         stats: session.stats(),
         signal: session.signal,
+        hazard: player.hazard,
         fps: this.fpsAvg,
         lightsOn: player.lightsOn,
         camName: CAMERA_NAMES[this.rig.mode],
@@ -589,7 +594,7 @@ export class App {
       scraping: player.lastCollision.scraping,
       horn: input.horn,
       rain: this.env.weather === 'rain',
-      signal: session.signal !== 0,
+      signal: session.signal !== 0 || player.hazard,
     });
   }
 

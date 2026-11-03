@@ -42,6 +42,7 @@ export interface VehicleGeometry {
   trim: THREE.BufferGeometry; // glass, tyres, rims, bumpers (vertex colours)
   head: THREE.BufferGeometry; // headlights
   tail: THREE.BufferGeometry; // tail/brake lights
+  ind: THREE.BufferGeometry; // turn indicators (aSide attribute: -1 left, 1 right)
   plate: THREE.BufferGeometry; // licence plate quads (uv mapped)
   params: VehicleParams;
 }
@@ -216,13 +217,21 @@ export function buildVehicleGeometry(P: VehicleParams): VehicleGeometry {
       wheel(trim, ax, wr, side * (W2 - 0.14), side, wr);
     }
 
-  // lights
-  const hy = P.kind === 'bus' ? 0.7 : P.hood - 0.12;
-  const ty = P.kind === 'bus' ? 0.9 : P.belt - 0.12;
+  // lights: lenses follow the rounded body ends; amber indicators sit outboard and wrap round the corners
+  const hy = P.kind === 'bus' ? 0.7 : P.hood - 0.2;
+  const ty = P.kind === 'bus' ? 0.9 : P.belt - 0.17;
+  const ind = new MeshBuilder();
+  const shellB = new MeshBuilder();
+  loft(shellB, xs, lower);
+  const shell = new THREE.Mesh(shellB.build()!, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
   for (const side of [-1, 1]) {
-    lightQuad(head, P.length / 2 + 0.005, hy, side * (W2 * 0.68), 0.2, P.width * 0.2, 1);
-    lightQuad(tail, -P.length / 2 - 0.005, ty, side * (W2 * 0.72), 0.14, P.width * 0.18, -1);
+    const zr = (a: number, b: number): [number, number] => (side > 0 ? [a * W2, b * W2] : [-b * W2, -a * W2]);
+    lensPatch(head, shell, L2, 1, hy - 0.08, hy + 0.08, ...zr(0.46, 0.86));
+    lensPatch(tail, shell, L2, -1, ty - 0.07, ty + 0.07, ...zr(0.5, 0.86));
+    lensPatch(ind, shell, L2, 1, hy - 0.06, hy + 0.04, ...zr(0.86, 0.93), side);
+    lensPatch(ind, shell, L2, -1, ty - 0.07, ty + 0.07, ...zr(0.86, 0.93), side);
   }
+  shell.geometry.dispose();
   // licence plates (front and rear)
   plateQuad(plate, P.length / 2 + 0.012, P.clearance + 0.3, 1);
   plateQuad(plate, -P.length / 2 - 0.012, P.clearance + 0.38, -1);
@@ -235,9 +244,74 @@ export function buildVehicleGeometry(P: VehicleParams): VehicleGeometry {
     trim: trim.build()!,
     head: head.build()!,
     tail: tail.build()!,
+    ind: ind.build('aSide')!,
     plate: plate.build()!,
     params: P,
   };
+}
+
+const lensRay = new THREE.Raycaster();
+const lensOrigin = new THREE.Vector3();
+const lensDir = new THREE.Vector3();
+
+/**
+ * Light lens draped over the body end between heights y0..y1 and lateral z0..z1 (z0 < z1):
+ * each vertex is projected onto the body shell along the car axis and lifted off the paint.
+ */
+function lensPatch(b: MeshBuilder, shell: THREE.Mesh, L2: number, dir: number, y0: number, y1: number, z0: number, z1: number, extra?: number) {
+  const NZ = 6;
+  const NY = 2;
+  const grid: number[][] = [];
+  for (let j = 0; j <= NZ; j++) {
+    const z = z0 + ((z1 - z0) * j) / NZ;
+    const col: number[] = [];
+    for (let r = 0; r <= NY; r++) {
+      const y = y0 + ((y1 - y0) * r) / NY;
+      lensRay.set(lensOrigin.set(dir * (L2 + 1), y, z), lensDir.set(-dir, 0, 0));
+      const hit = lensRay.intersectObject(shell)[0];
+      let x = dir * L2;
+      let nx = dir;
+      let ny = 0;
+      let nz = 0;
+      if (hit?.face) {
+        x = hit.point.x;
+        const n = hit.face.normal;
+        const flip = n.x * dir + n.z * Math.sign(z) < 0 ? -1 : 1;
+        nx = n.x * flip;
+        ny = n.y * flip;
+        nz = n.z * flip;
+      }
+      col.push(b.vertex(x + nx * 0.006, y + ny * 0.006, z + nz * 0.006, nx, ny, nz, j / NZ, r / NY, undefined, extra));
+    }
+    grid.push(col);
+  }
+  for (let j = 0; j < NZ; j++)
+    for (let r = 0; r < NY; r++) {
+      if (dir > 0) b.quad(grid[j][r], grid[j][r + 1], grid[j + 1][r + 1], grid[j + 1][r]);
+      else b.quad(grid[j][r], grid[j + 1][r], grid[j + 1][r + 1], grid[j][r + 1]);
+    }
+}
+
+/**
+ * Amber indicator material. Vertices carry aSide (-1 left / 1 right); the lit
+ * state comes from an instanced aInd (x = left, y = right) or uniforms uL / uR.
+ */
+export function indicatorMaterial(mode: 'instanced' | 'uniform') {
+  const uniforms = { uL: { value: 0 }, uR: { value: 0 } };
+  const material = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.6, 1.25, 0.12), toneMapped: false });
+  material.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, uniforms);
+    const decl = mode === 'instanced' ? 'attribute vec2 aInd;' : 'uniform float uL;\nuniform float uR;';
+    const lit = mode === 'instanced' ? 'vOn = aSide < 0.0 ? aInd.x : aInd.y;' : 'vOn = aSide < 0.0 ? uL : uR;';
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', `#include <common>\nattribute float aSide;\n${decl}\nvarying float vOn;`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>\n${lit}`);
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying float vOn;')
+      .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb *= mix(0.06, 1.0, vOn);');
+  };
+  material.customProgramCacheKey = () => 'indicator-' + mode;
+  return { material, uniforms };
 }
 
 function boxAt(b: MeshBuilder, cx: number, cy: number, cz: number, lx: number, ly: number, lz: number, color: THREE.Color) {
@@ -265,15 +339,6 @@ function appendGeometry(b: MeshBuilder, g: THREE.BufferGeometry, color: THREE.Co
   for (let i = 0; i < p.count; i++) b.vertex(p.getX(i), p.getY(i), p.getZ(i), n.getX(i), n.getY(i), n.getZ(i), u ? u.getX(i) : 0, u ? u.getY(i) : 0, color);
   const idx = g.index!;
   for (let i = 0; i < idx.count; i += 3) b.tri(base + idx.getX(i), base + idx.getX(i + 1), base + idx.getX(i + 2));
-}
-
-function lightQuad(b: MeshBuilder, x: number, y: number, z: number, h: number, w: number, dir: number) {
-  const a = b.vertex(x, y - h / 2, z - w / 2, dir, 0, 0, 0, 0);
-  const c = b.vertex(x, y - h / 2, z + w / 2, dir, 0, 0, 1, 0);
-  const d = b.vertex(x, y + h / 2, z + w / 2, dir, 0, 0, 1, 1);
-  const e = b.vertex(x, y + h / 2, z - w / 2, dir, 0, 0, 0, 1);
-  if (dir > 0) b.quad(a, e, d, c);
-  else b.quad(a, c, d, e);
 }
 
 function plateQuad(b: MeshBuilder, x: number, y: number, dir: number) {

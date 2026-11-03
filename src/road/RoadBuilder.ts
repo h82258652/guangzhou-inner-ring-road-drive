@@ -3,7 +3,7 @@
  * lane markings (GB 5768 style), New Jersey barriers, box girders, piers
  * (incl. portal frames under double-deck sections), single-arm LED street
  * lights, bougainvillea planters, noise barriers, expansion joints, gore
- * chevrons and crash cushions.
+ * chevrons, pavement speed numerals, guide arrows and crash cushions.
  */
 import * as THREE from 'three';
 import { ChunkedBuilder, MeshBuilder } from '../world/MeshBuilder';
@@ -11,7 +11,8 @@ import { roadMaterials } from '../world/Materials';
 import { type Edge, type RoadNetwork, newFrame, type RoadFrame } from './Network';
 
 const WHITE = new THREE.Color(0.92, 0.92, 0.9);
-const YELLOW = new THREE.Color(0.95, 0.72, 0.1);
+// linear-space road paint yellow (≈ sRGB #EDB627)
+const YELLOW = new THREE.Color(0.84, 0.47, 0.02);
 const DARK = new THREE.Color(0.25, 0.25, 0.26);
 
 const LAMP_SPACING = 36;
@@ -33,6 +34,8 @@ export interface RoadVisuals {
   group: THREE.Group;
   lampHeads: THREE.InstancedMesh;
   lampPositions: THREE.Vector3[];
+  /** pavement markings placed: guide arrow sets and speed numeral sets */
+  pavement: { arrows: number; numerals: number };
 }
 
 export function buildRoads(net: RoadNetwork): RoadVisuals {
@@ -59,6 +62,7 @@ export function buildRoads(net: RoadNetwork): RoadVisuals {
     buildLamps(e, lampPoles, lampHeads, lampPositions, f);
     buildCushions(e, cushions, f);
   }
+  const pavement = buildRoadText(net, cb, f);
 
   const group = cb.toGroup(
     {
@@ -91,7 +95,7 @@ export function buildRoads(net: RoadNetwork): RoadVisuals {
   const cushionGeo = new THREE.CylinderGeometry(0.42, 0.42, 1.0, 12);
   cushionGeo.translate(0, 0.5, 0);
   group.add(instanced(cushionGeo, mats.cushion, cushions, false));
-  return { group, lampHeads: heads, lampPositions };
+  return { group, lampHeads: heads, lampPositions, pavement };
 }
 
 function instanced(geo: THREE.BufferGeometry, mat: THREE.Material, list: THREE.Matrix4[], shadow: boolean) {
@@ -358,6 +362,128 @@ function buildMarkings(e: Edge, cb: ChunkedBuilder, f: RoadFrame, _f2: RoadFrame
     if (e.struct[i] === 0) continue;
     stripe(e, cb, f, s, s + 0.35, () => e.blAt(s) + 0.05, () => e.brAt(s) - 0.05, DARK, 'joint', 0.008);
   }
+}
+
+/* ---------- pavement numerals and guide arrows (GB 5768.3 style) ---------- */
+
+type Poly = [number, number][]; // (along road, lateral to the right), CCW
+
+const rect = (s0: number, s1: number, d0: number, d1: number): Poly => [
+  [s0, d0],
+  [s1, d0],
+  [s1, d1],
+  [s0, d1],
+];
+
+/** Elongated seven-segment numerals; the top of each digit points down the road. */
+function numeralPolys(text: string, H: number, W: number, gap: number): Poly[] {
+  const th = H * 0.085;
+  const tv = W * 0.24;
+  const m = H / 2;
+  const SEG: Record<string, [number, number, number, number]> = {
+    a: [H - th, H, 0, W],
+    b: [m, H, W - tv, W],
+    c: [0, m, W - tv, W],
+    d: [0, th, 0, W],
+    e: [0, m, 0, tv],
+    f: [m, H, 0, tv],
+    g: [m - th / 2, m + th / 2, 0, W],
+  };
+  const DIGITS: Record<string, string> = { 0: 'abcdef', 1: 'bc', 2: 'abdeg', 3: 'abcdg', 4: 'bcfg', 5: 'acdfg', 6: 'acdefg', 7: 'abc', 8: 'abcdefg', 9: 'abcdfg' };
+  const total = text.length * W + (text.length - 1) * gap;
+  const out: Poly[] = [];
+  [...text].forEach((ch, i) => {
+    const d0 = -total / 2 + i * (W + gap);
+    for (const k of DIGITS[ch] ?? '') {
+      const [s0, s1, a, b] = SEG[k];
+      out.push(rect(s0, s1, d0 + a, d0 + b));
+    }
+  });
+  return out;
+}
+
+/** 6 m guide arrow; 'right' / 'left' add a forward-diagonal branch towards an exit. */
+function arrowPolys(branch: 0 | 1 | -1): Poly[] {
+  const out: Poly[] = [
+    rect(0, 4.3, -0.1, 0.1),
+    [
+      [4.3, -0.36],
+      [6.0, 0],
+      [4.3, 0.36],
+    ],
+  ];
+  if (branch) {
+    const ang = (32 * Math.PI) / 180;
+    const u: [number, number] = [Math.cos(ang), branch * Math.sin(ang)];
+    const w: [number, number] = [-u[1], u[0]];
+    const at = (p: [number, number], v: [number, number], k: number): [number, number] => [p[0] + v[0] * k, p[1] + v[1] * k];
+    const p0: [number, number] = [1.3, 0];
+    const p1 = at(p0, u, 1.15);
+    out.push([at(p0, w, -0.1), at(p1, w, -0.1), at(p1, w, 0.1), at(p0, w, 0.1)]);
+    out.push([at(p1, w, -0.32), at(p1, u, 0.95), at(p1, w, 0.32)]);
+  }
+  return out;
+}
+
+function buildRoadText(net: RoadNetwork, cb: ChunkedBuilder, f: RoadFrame) {
+  const count = { arrows: 0, numerals: 0 };
+  const used = new Map<number, [number, number][]>();
+  const free = (e: Edge, s0: number, s1: number) => {
+    if (s0 < 3 || s1 > e.length - 3) return false;
+    if ((used.get(e.id) ?? []).some(([a, b]) => s1 > a - 4 && s0 < b + 4)) return false;
+    const n0 = e.lanesAt(s0);
+    if (Math.abs(n0 - Math.round(n0)) > 0.02 || n0 < 0.98) return false;
+    for (let s = s0; s <= s1; s += 1) {
+      const i = e.idx(s);
+      if (e.ol[i] >= 0 || e.or[i] >= 0 || Math.abs(e.lanesAt(s) - n0) > 0.02) return false;
+    }
+    return true;
+  };
+  const paint = (e: Edge, s: number, polys: Poly[], len: number, color: THREE.Color, lanes: (k: number, n: number) => Poly[] | null) => {
+    const n = Math.round(e.lanesAt(s));
+    for (let k = 0; k < n; k++) {
+      const dc = e.laneCenter(s, k);
+      for (const p of lanes(k, n) ?? polys) roadPoly(e, cb, f, p.map(([a, d]) => [s + a, dc + d] as [number, number]), color, 0.014);
+    }
+    const list = used.get(e.id) ?? [];
+    list.push([s, s + len]);
+    used.set(e.id, list);
+  };
+  const speedMark = (e: Edge, s: number) => {
+    const v = Math.round(e.speedAt(s) / 10) * 10;
+    paint(e, s, numeralPolys(String(v), 5, 0.82, 0.3), 5, YELLOW, () => null);
+    count.numerals++;
+  };
+  // guide arrows on the approach to every exit: the exit lane gets straight + diagonal
+  for (const x of net.exits) {
+    const side = x.side === 'right' ? 1 : -1;
+    for (const back of [280, 170, 70]) {
+      const loc = net.atLineS(x.line, x.s - back);
+      if (!free(loc.edge, loc.s - 1, loc.s + 7) || loc.edge.lanesAt(loc.s) < 1.98) continue;
+      const branchy = arrowPolys(side as 1 | -1);
+      paint(loc.edge, loc.s, arrowPolys(0), 6, WHITE, (k, n) => ((side > 0 ? k === n - 1 : k === 0) ? branchy : null));
+      count.arrows++;
+    }
+    // ramp speed limit once the ramp has left the main line
+    const r = net.edges[x.edge];
+    for (let s = 40; s < r.length - 20; s += 10)
+      if (free(r, s - 1, s + 6)) {
+        speedMark(r, s);
+        break;
+      }
+  }
+  // maximum-speed numerals on the main lines (roughly every 1.2 km, shifted to a clear spot)
+  for (const line of ['A', 'B'] as const) {
+    const L = net.lines[line].length;
+    for (let ls = 500; ls < L - 200; ls += 1200)
+      for (let off = 0; off <= 300; off += 15) {
+        const loc = net.atLineS(line, ls + off);
+        if (!free(loc.edge, loc.s - 1, loc.s + 6)) continue;
+        speedMark(loc.edge, loc.s);
+        break;
+      }
+  }
+  return count;
 }
 
 /** Barriers along non-open sides; planters / noise walls on top for viaducts. */

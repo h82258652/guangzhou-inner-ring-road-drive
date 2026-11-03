@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { VehicleDynamics, type Controls, type VehicleSpec } from './Dynamics';
 import { RoadTracker, type CollisionInfo } from './RoadTracker';
 import type { Edge, RoadNetwork } from '../road/Network';
-import { buildVehicleGeometry, drawPlate, randomPlate, VEHICLES, type VehicleKind } from './CarModel';
+import { buildVehicleGeometry, drawPlate, indicatorMaterial, randomPlate, VEHICLES, type VehicleKind } from './CarModel';
 import { clamp, lerp } from '../shared/math';
 
 export class Player {
@@ -27,8 +27,9 @@ export class Player {
   lastCollision: CollisionInfo = { impact: 0, side: 0, scraping: false };
   /** -1 left, 1 right, 0 off */
   signal: -1 | 0 | 1 = 0;
-  private signalMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.2, 1.1, 0.1), toneMapped: false });
-  private signalLamps: THREE.Mesh[] = [];
+  /** both sides flashing */
+  hazard = false;
+  private signal3 = indicatorMaterial('uniform');
   private blink = 0;
   interior: THREE.Group;
 
@@ -72,23 +73,8 @@ export class Player {
       this.body.add(mesh);
     }
     this.group.add(this.body);
-    // turn signal lamps (amber) at the four corners
-    const P = geo.params;
-    const sigGeo = new THREE.BoxGeometry(0.06, 0.08, 0.16);
-    for (const [x, side] of [
-      [P.length / 2 - 0.05, -1],
-      [P.length / 2 - 0.05, 1],
-      [-P.length / 2 + 0.05, -1],
-      [-P.length / 2 + 0.05, 1],
-    ] as [number, number][]) {
-      const m = new THREE.Mesh(sigGeo, this.signalMat);
-      m.position.set(x, x > 0 ? P.hood - 0.1 : P.belt - 0.05, side * (P.width / 2 - 0.1));
-      m.userData.side = side;
-      m.visible = false;
-      this.signalLamps.push(m);
-      this.body.add(m);
-    }
-    this.interior = buildInterior(P.width);
+    this.body.add(new THREE.Mesh(geo.ind, this.signal3.material));
+    this.interior = buildInterior(geo.params.width);
     this.interior.visible = false;
     this.body.add(this.interior);
     this.headlight = new THREE.SpotLight(0xfff4e0, 0, 140, 0.52, 0.45, 1.4);
@@ -176,8 +162,9 @@ export class Player {
     this.headMat.color.setRGB(...((this.lightsOn ? [2.4, 2.35, 2.2] : [0.85, 0.85, 0.8]) as [number, number, number]));
     this.headlight.intensity = this.lightsOn ? 900 : 0;
     this.blink += dt;
-    const on = this.signal !== 0 && Math.floor(this.blink * 2.6) % 2 === 0;
-    for (const m of this.signalLamps) m.visible = on && m.userData.side === this.signal;
+    const on = Math.floor(this.blink * 2.6) % 2 === 0 ? 1 : 0;
+    this.signal3.uniforms.uL.value = this.hazard || this.signal < 0 ? on : 0;
+    this.signal3.uniforms.uR.value = this.hazard || this.signal > 0 ? on : 0;
   }
 
   kick(amount: number) {

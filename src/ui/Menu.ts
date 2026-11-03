@@ -142,7 +142,7 @@ export class Menu {
     this.el.innerHTML = `<div class="card"><h1>操作说明</h1><div class="help">
       <kbd>W</kbd>/<kbd>↑</kbd> 油门　<kbd>S</kbd>/<kbd>↓</kbd> 刹车（停稳后长按倒车）<br/>
       <kbd>A</kbd>/<kbd>D</kbd> 或 <kbd>←</kbd>/<kbd>→</kbd> 转向　<kbd>空格</kbd> 手刹<br/>
-      <kbd>Q</kbd>/<kbd>E</kbd> 左/右转向灯（变道前请打灯）<br/>
+      <kbd>Q</kbd>/<kbd>E</kbd> 左/右转向灯（变道前请打灯）　<kbd>X</kbd> 双闪<br/>
       <kbd>C</kbd> 切换视角　<kbd>V</kbd> 回头看　<kbd>L</kbd> 大灯　<kbd>B</kbd> 喇叭<br/>
       <kbd>M</kbd> 全图　<kbd>R</kbd> 回到车道　<kbd>Esc</kbd> 暂停<br/>
       支持手柄（RT 油门 / LT 刹车 / 左摇杆转向）和触屏。<br/><br/>
