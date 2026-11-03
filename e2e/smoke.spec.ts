@@ -30,5 +30,6 @@ test('loads the city, starts a drive on line A and accelerates', async ({ page }
   expect(info.line).toBe('A');
   expect(info.cars).toBeGreaterThan(50);
   await expect(page.locator('.linebadge')).toContainText('内环路 A线');
-  expect(errors.filter((e) => !/GPU stall|WebGL|GL_/i.test(e))).toEqual([]);
+  // driver performance chatter from software rendering is not an application error; shader errors are
+  expect(errors.filter((e) => !/GPU stall|GL Driver Message|software WebGL/i.test(e))).toEqual([]);
 });
