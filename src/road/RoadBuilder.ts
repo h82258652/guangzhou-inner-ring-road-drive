@@ -48,6 +48,7 @@ export function buildRoads(net: RoadNetwork): RoadVisuals {
   const lampPositions: THREE.Vector3[] = [];
   const cushions: THREE.Matrix4[] = [];
 
+  occluder = makeOccluder(net);
   for (const e of net.edges) {
     const lampD = e.kind === 'main' ? 'right' : 'right';
     buildSurface(e, cb, f, lampD);
@@ -145,6 +146,46 @@ export function mergeGeometries(geos: THREE.BufferGeometry[]): THREE.BufferGeome
 
 /* ---------------- helpers ---------------- */
 
+/**
+ * Where OSM geometry makes two decks on the same level overlap slightly, a
+ * barrier would cut through the neighbouring roadway; such barrier pieces are
+ * suppressed.
+ */
+let occluder: (e: Edge, x: number, z: number, y: number) => boolean = () => false;
+
+function makeOccluder(net: RoadNetwork) {
+  const cell = 10;
+  const grid = new Map<number, [Edge, number][]>();
+  const key = (cx: number, cz: number) => (cx + 5000) * 10000 + (cz + 5000);
+  for (const e of net.edges) {
+    for (let i = 0; i < e.n; i++) {
+      const k = key(Math.floor(e.x[i] / cell), Math.floor(e.z[i] / cell));
+      let a = grid.get(k);
+      if (!a) grid.set(k, (a = []));
+      a.push([e, i]);
+    }
+  }
+  return (e: Edge, x: number, z: number, y: number) => {
+    const cx = Math.floor(x / cell);
+    const cz = Math.floor(z / cell);
+    for (let dx = -1; dx <= 1; dx++)
+      for (let dz = -1; dz <= 1; dz++) {
+        const a = grid.get(key(cx + dx, cz + dz));
+        if (!a) continue;
+        for (const [o, i] of a) {
+          if (o === e || Math.abs(o.y[i] - y) > 1.2) continue;
+          const rx = x - o.x[i];
+          const rz = z - o.z[i];
+          const along = rx * o.tx[i] + rz * o.tz[i];
+          if (Math.abs(along) > o.ds * 0.6) continue;
+          const d = -rx * o.tz[i] + rz * o.tx[i];
+          if (d > o.bl[i] + 0.3 && d < o.br[i] - 0.3) return true;
+        }
+      }
+    return false;
+  };
+}
+
 function lampLateral(e: Edge, i: number): number {
   // lamps stand on the right barrier; on open sides they are absent
   return e.or[i] >= 0 ? 999 : e.br[i] - 2.4;
@@ -160,7 +201,8 @@ function buildSurface(e: Edge, cb: ChunkedBuilder, f: RoadFrame, _lampSide: stri
     const s = i * e.ds;
     e.frame(s, 0, f);
     const key = chunkKey(f.x, f.z, cb.size);
-    const yy = e.y[i];
+    // ramps sit a hair above main decks so overlapping surfaces do not z-fight
+    const yy = e.y[i] + (e.kind === 'ramp' ? 0.012 : 0);
     const lx = f.x + f.nx * e.bl[i];
     const lz = f.z + f.nz * e.bl[i];
     const rx = f.x + f.nx * e.br[i];
@@ -219,7 +261,7 @@ function stripe(
     e.frame(s, 0, f);
     const a = dA(s);
     const c = dB(s);
-    const y = e.yAt(s) + lift;
+    const y = e.yAt(s) + lift + (e.kind === 'ramp' ? 0.012 : 0);
     const lamp = 999;
     const ia = b.vertex(f.x + f.nx * a, y, f.z + f.nz * a, 0, 1, 0, a, s, color, lamp);
     const ib = b.vertex(f.x + f.nx * c, y, f.z + f.nz * c, 0, 1, 0, c, s, color, lamp);
@@ -235,7 +277,7 @@ function roadPoly(e: Edge, cb: ChunkedBuilder, f: RoadFrame, pts: [number, numbe
   const b = cb.get(f.x, f.z, 'marking');
   const ids = pts.map(([s, d]) => {
     e.frame(s, d, f);
-    return b.vertex(f.x, e.yAt(s) + lift, f.z, 0, 1, 0, d, s, color, 999);
+    return b.vertex(f.x, e.yAt(s) + lift + (e.kind === 'ramp' ? 0.012 : 0), f.z, 0, 1, 0, d, s, color, 999);
   });
   for (let k = 1; k + 1 < ids.length; k++) b.tri(ids[0], ids[k + 1], ids[k]);
 }
@@ -324,14 +366,21 @@ function buildBarriers(e: Edge, cb: ChunkedBuilder, f: RoadFrame) {
     const open = side < 0 ? e.ol : e.or;
     const bound = side < 0 ? e.bl : e.br;
     const noise = side < 0 ? e.noiseL : e.noiseR;
+    // samples where a barrier is wanted (not open, not cutting through another deck)
+    const want = new Uint8Array(e.n);
+    for (let i = 0; i < e.n; i++) {
+      if (open[i] >= 0) continue;
+      e.frame(i * e.ds, bound[i] + side * 0.25, f);
+      want[i] = occluder(e, f.x, f.z, e.y[i]) ? 0 : 1;
+    }
     let i = 0;
     while (i < e.n - 1) {
-      if (open[i] >= 0) {
+      if (!want[i]) {
         i++;
         continue;
       }
       let j = i;
-      while (j < e.n - 1 && open[j + 1] < 0) j++;
+      while (j < e.n - 1 && want[j + 1]) j++;
       if (j > i) extrudeBarrier(e, cb, f, i, j, side, bound, noise);
       i = j + 1;
     }
@@ -641,5 +690,6 @@ function buildCushions(e: Edge, cushions: THREE.Matrix4[], f: RoadFrame) {
     }
   }
 }
+
 
 

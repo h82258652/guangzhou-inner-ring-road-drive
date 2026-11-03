@@ -10,6 +10,7 @@ export class Minimap {
   private paths: Record<LineId, Path2D>;
   private ramps: Path2D;
   private water: Path2D;
+  private center: [number, number] = [0, 0];
 
   constructor(
     readonly net: RoadNetwork,
@@ -23,6 +24,18 @@ export class Minimap {
     this.el.appendChild(this.canvas);
     this.g = this.canvas.getContext('2d')!;
     this.paths = { A: new Path2D(), B: new Path2D() };
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    for (const e of net.lines.A.edges)
+      for (let i = 0; i < e.n; i += 8) {
+        minX = Math.min(minX, e.x[i]);
+        maxX = Math.max(maxX, e.x[i]);
+        minZ = Math.min(minZ, e.z[i]);
+        maxZ = Math.max(maxZ, e.z[i]);
+      }
+    this.center = [-(minX + maxX) / 2, -(minZ + maxZ) / 2];
     for (const line of ['A', 'B'] as LineId[]) {
       const p = this.paths[line];
       let first = true;
@@ -75,7 +88,7 @@ export class Minimap {
     g.translate(W / 2, W / 2);
     if (!this.big) g.rotate(-heading - Math.PI / 2);
     g.scale(scale, scale);
-    if (this.big) g.translate(-300, 0);
+    if (this.big) g.translate(this.center[0], this.center[1]);
     else g.translate(-px, -pz);
     g.fillStyle = '#1f4a63';
     g.fill(this.water, 'evenodd');

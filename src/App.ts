@@ -69,6 +69,7 @@ export class App {
   private lastJoint = { edge: -1, k: -1 };
   private f = newFrame();
   private lastOptions: GameOptions | null = null;
+  private carHitCooldown = 0;
 
   constructor(readonly root: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: QUALITY[this.settings.quality].antialias, powerPreference: 'high-performance' });
@@ -505,7 +506,9 @@ export class App {
     };
     this.traffic.update(dt, proxy, player.group.position);
     const carImpact = this.carCollisions();
-    if (carImpact > 0) {
+    this.carHitCooldown -= dt;
+    if (carImpact > 0 && this.carHitCooldown <= 0) {
+      this.carHitCooldown = 2;
       session.carHits++;
       this.hud.toast('与其他车辆发生碰撞', 'bad');
     }
@@ -525,6 +528,9 @@ export class App {
       this.lastJoint = { edge: e.id, k };
     } else this.lastJoint = { edge: e.id, k: -9 };
 
+    player.signal = session.signal;
+    player.interior.visible = this.rig.mode === 'cockpit';
+    player.updateInterior();
     player.syncVisual(dt);
     player.group.updateMatrixWorld(true);
     this.rig.update(dt, player.group, player.body, player.dyn.vx, input.lookBack);
@@ -691,3 +697,4 @@ export class App {
 function frame() {
   return new Promise((r) => requestAnimationFrame(() => r(null)));
 }
+

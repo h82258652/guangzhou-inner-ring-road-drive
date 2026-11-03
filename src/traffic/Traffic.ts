@@ -21,7 +21,7 @@ const KINDS: { kind: VehicleKind; w: number }[] = [
   { kind: 'van', w: 0.03 },
   { kind: 'bus', w: 0.03 },
 ];
-const MAX_PER_KIND = 140;
+const MAX_PER_KIND = 260;
 const DENSITY: Record<Density, number> = { sparse: 4.5, normal: 11, rush: 30 };
 const WINDOW = 1500;
 
@@ -641,3 +641,4 @@ export class Traffic {
     });
   }
 }
+

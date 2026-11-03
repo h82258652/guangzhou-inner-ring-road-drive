@@ -25,6 +25,12 @@ export class Player {
   readonly halfLength: number;
   readonly halfWidth: number;
   lastCollision: CollisionInfo = { impact: 0, side: 0, scraping: false };
+  /** -1 left, 1 right, 0 off */
+  signal: -1 | 0 | 1 = 0;
+  private signalMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.2, 1.1, 0.1), toneMapped: false });
+  private signalLamps: THREE.Mesh[] = [];
+  private blink = 0;
+  interior: THREE.Group;
 
   constructor(
     readonly net: RoadNetwork,
@@ -66,6 +72,25 @@ export class Player {
       this.body.add(mesh);
     }
     this.group.add(this.body);
+    // turn signal lamps (amber) at the four corners
+    const P = geo.params;
+    const sigGeo = new THREE.BoxGeometry(0.06, 0.08, 0.16);
+    for (const [x, side] of [
+      [P.length / 2 - 0.05, -1],
+      [P.length / 2 - 0.05, 1],
+      [-P.length / 2 + 0.05, -1],
+      [-P.length / 2 + 0.05, 1],
+    ] as [number, number][]) {
+      const m = new THREE.Mesh(sigGeo, this.signalMat);
+      m.position.set(x, x > 0 ? P.hood - 0.1 : P.belt - 0.05, side * (P.width / 2 - 0.1));
+      m.userData.side = side;
+      m.visible = false;
+      this.signalLamps.push(m);
+      this.body.add(m);
+    }
+    this.interior = buildInterior(P.width);
+    this.interior.visible = false;
+    this.body.add(this.interior);
     this.headlight = new THREE.SpotLight(0xfff4e0, 0, 140, 0.52, 0.45, 1.4);
     this.headlight.position.set(2.0, 0.75, 0);
     this.headlight.target.position.set(30, -1.5, 0);
@@ -150,10 +175,64 @@ export class Player {
     this.tailMat.color.setRGB(this.braking ? 2.2 : this.lightsOn ? 0.9 : 0.35, 0.02, 0.02);
     this.headMat.color.setRGB(...((this.lightsOn ? [2.4, 2.35, 2.2] : [0.85, 0.85, 0.8]) as [number, number, number]));
     this.headlight.intensity = this.lightsOn ? 900 : 0;
+    this.blink += dt;
+    const on = this.signal !== 0 && Math.floor(this.blink * 2.6) % 2 === 0;
+    for (const m of this.signalLamps) m.visible = on && m.userData.side === this.signal;
   }
 
   kick(amount: number) {
     this.bounceV -= amount;
   }
+
+  /** Steering wheel follows the steering angle (cockpit view). */
+  updateInterior() {
+    const wheel = this.interior.getObjectByName('wheel');
+    if (wheel) wheel.rotation.x = -this.dyn.steer * 9;
+  }
+}
+
+/** Simple left-hand-drive cockpit: dashboard, steering wheel, A-pillars, mirror. */
+function buildInterior(width: number): THREE.Group {
+  const g = new THREE.Group();
+  const dark = new THREE.MeshStandardMaterial({ color: 0x1d1f22, roughness: 0.8 });
+  const trim = new THREE.MeshStandardMaterial({ color: 0x3a3d42, roughness: 0.6 });
+  const dash = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.18, width - 0.2), dark);
+  dash.position.set(0.62, 0.93, 0);
+  dash.rotation.z = -0.12;
+  g.add(dash);
+  const top = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.04, width - 0.22), trim);
+  top.position.set(0.66, 1.03, 0);
+  g.add(top);
+  // instrument cluster hood
+  const hood = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 0.42, 16, 1, true, 0, Math.PI), dark);
+  hood.rotation.set(Math.PI / 2, 0, Math.PI / 2);
+  hood.position.set(0.42, 1.02, -0.38);
+  g.add(hood);
+  const wheelGroup = new THREE.Group();
+  wheelGroup.name = 'wheel';
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.19, 0.022, 8, 28), dark);
+  ring.rotation.y = Math.PI / 2;
+  wheelGroup.add(ring);
+  const spoke = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.05, 0.34), trim);
+  wheelGroup.add(spoke);
+  const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.05, 12), trim);
+  hub.rotation.z = Math.PI / 2;
+  wheelGroup.add(hub);
+  wheelGroup.position.set(0.25, 0.98, -0.38);
+  wheelGroup.rotation.z = 0.35;
+  g.add(wheelGroup);
+  for (const side of [-1, 1]) {
+    const pillar = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.62, 0.09), dark);
+    pillar.position.set(0.66, 1.2, side * (width / 2 - 0.12));
+    pillar.rotation.z = 0.95;
+    g.add(pillar);
+  }
+  const header = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.05, width - 0.25), dark);
+  header.position.set(0.38, 1.42, 0);
+  g.add(header);
+  const mirror = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.07, 0.24), trim);
+  mirror.position.set(0.42, 1.33, 0);
+  g.add(mirror);
+  return g;
 }
 

@@ -42,6 +42,70 @@ export class Signs {
         this.group.add(inst.group);
       }
     }
+    for (const c of net.cameras) {
+      const e = net.edges[c.edge];
+      if (!e) continue;
+      const kind = c.kind;
+      const inst = this.createCameraGantry(e, c.s, kind, f);
+      this.items.push(inst);
+      this.group.add(inst.group);
+    }
+  }
+
+  /** Enforcement camera gantry (电子警察 / 测速) with one camera per lane. */
+  private createCameraGantry(e: Edge, s: number, kind: 'fixed' | 'section-start' | 'section-end', f: ReturnType<typeof newFrame>): SignInstance {
+    s = Math.max(0, Math.min(e.length, s));
+    e.frame(s, 0, f);
+    const i = e.idx(s);
+    const g = new THREE.Group();
+    g.position.set(f.x, e.y[i], f.z);
+    g.rotation.y = -Math.atan2(f.tz, f.tx);
+    const left = e.bl[i] - 0.9;
+    const right = e.br[i] + 0.9;
+    const H = 6.6;
+    for (const z of [left, right]) {
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.22, H, 8), this.metal);
+      post.position.set(0.3, H / 2, z);
+      g.add(post);
+    }
+    const beam = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.35, right - left), this.metal);
+    beam.position.set(0.3, H, (left + right) / 2);
+    g.add(beam);
+    const camMat = new THREE.MeshStandardMaterial({ color: 0xe9ecef, roughness: 0.5 });
+    const lensMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.2, metalness: 0.5 });
+    const lanes = Math.max(1, Math.round(e.lanes[i]));
+    for (let k = 0; k < lanes; k++) {
+      const z = e.laneCenter(s, k);
+      const body = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.32, 0.34), camMat);
+      body.position.set(0.0, H - 0.4, z);
+      const lens = new THREE.Mesh(new THREE.CircleGeometry(0.11, 12), lensMat);
+      lens.rotation.y = -Math.PI / 2;
+      lens.position.set(-0.38, H - 0.4, z);
+      const flash = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 0.5), camMat);
+      flash.position.set(0.05, H - 0.4, z + 0.7);
+      g.add(body, lens, flash);
+    }
+    const faces: SignInstance['faces'] = [];
+    if (kind !== 'fixed') {
+      const w = 3.4;
+      const h = 1.5;
+      const geo = new THREE.PlaneGeometry(w, h);
+      geo.rotateY(-Math.PI / 2);
+      const mesh = new THREE.Mesh(geo, this.placeholder);
+      mesh.position.set(-0.05, H - 1.25, right - 2.2);
+      g.add(mesh);
+      faces.push({
+        mesh,
+        w,
+        h,
+        draw: (g2, W, H2) => {
+          frame(g2, W, H2, '#1c4fb8');
+          text(g2, kind === 'section-start' ? '区间测速起点' : '区间测速终点', W / 2, H2 * 0.38, H2 * 0.28, '#fff', 'center');
+          text(g2, 'AVERAGE SPEED CHECK', W / 2, H2 * 0.72, H2 * 0.15, '#fff', 'center', false);
+        },
+      });
+    }
+    return { spec: { kind: 'camera', edge: e.id, s, line: e.line }, group: g, faces, pos: g.position.clone(), loaded: false };
   }
 
   private exitInfo(line: LineId | null, code?: string): ExitFile | undefined {

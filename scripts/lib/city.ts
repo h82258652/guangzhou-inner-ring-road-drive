@@ -710,13 +710,13 @@ function annotateNetwork(net: Network, buildings: BuildingRec[], wr: Raster, WAT
       const nz = (b[0] - a[0]) / dl;
       const pR: V2 = [e.pts[i][0] + nx * (e.br[i] + 4), e.pts[i][1] + nz * (e.br[i] + 4)];
       const pL: V2 = [e.pts[i][0] + nx * (e.bl[i] - 4), e.pts[i][1] + nz * (e.bl[i] - 4)];
-      if (e.or[i] < 0 && nearBuilding(pR, e.y[i], 14)) nr[i] = nr[Math.min(n - 1, i + 1)] = 1;
-      if (e.ol[i] < 0 && nearBuilding(pL, e.y[i], 14)) nl[i] = nl[Math.min(n - 1, i + 1)] = 1;
+      if (e.or[i] < 0 && nearBuilding(pR, e.y[i], 7)) nr[i] = nr[Math.min(n - 1, i + 1)] = 1;
+      if (e.ol[i] < 0 && nearBuilding(pL, e.y[i], 7)) nl[i] = nl[Math.min(n - 1, i + 1)] = 1;
     }
     // close short gaps and drop short runs
     for (const arr of [nl, nr]) {
       fillGaps(arr, Math.round(40 / e.ds));
-      dropShort(arr, Math.round(60 / e.ds));
+      dropShort(arr, Math.round(100 / e.ds));
       for (let i = 0; i < n; i++) if ((arr === nl ? e.ol[i] : e.or[i]) >= 0) arr[i] = 0;
     }
   }
@@ -742,6 +742,7 @@ function dropShort(a: number[], minRun: number) {
     }
   }
 }
+
 
 
 
