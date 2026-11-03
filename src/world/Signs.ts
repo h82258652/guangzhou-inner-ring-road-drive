@@ -155,17 +155,17 @@ export class Signs {
       case 'exit-now': {
         const x = this.exitInfo(line, spec.exitCode);
         if (!x) return null;
-        gantry(7.4);
+        gantry(9.0);
         const w = 8.2;
         const h = 3.6;
         const right = x.side === 'right';
         const z = right ? br - w / 2 + 0.3 : bl + w / 2 - 0.3;
         const now = spec.kind === 'exit-now';
-        panel(w, h, z, 7.4 - h / 2 + 0.2, (g2, W, H) => drawExitSign(g2, W, H, x, now ? null : spec.distanceText ?? '', right));
+        panel(w, h, z, 9.0 - h / 2 + 0.25, (g2, W, H) => drawExitSign(g2, W, H, x, now ? null : spec.distanceText ?? '', right));
         // lane guidance panel over the through lanes
         if (now) {
           const z2 = right ? bl + 3.2 : br - 3.2;
-          panel(5.4, 2.6, z2, 7.4 - 1.1, (g2, W, H) => drawThroughSign(g2, W, H, x.line, right));
+          panel(5.4, 2.6, z2, 9.0 - 1.05, (g2, W, H) => drawThroughSign(g2, W, H, x.line, right));
         }
         break;
       }
@@ -180,10 +180,10 @@ export class Signs {
         break;
       }
       case 'confirm': {
-        gantry(7.2);
+        gantry(9.0);
         const lineName = line ?? 'A';
         const next = this.upcomingExits(lineName, e, s, 2);
-        panel(7.0, 3.3, br - 3.8, 7.2 - 1.45, (g2, W, H) => drawConfirmSign(g2, W, H, lineName, next));
+        panel(7.0, 3.3, br - 3.8, 9.0 - 1.4, (g2, W, H) => drawConfirmSign(g2, W, H, lineName, next));
         break;
       }
       case 'speed': {
@@ -209,8 +209,8 @@ export class Signs {
         break;
       }
       case 'vms': {
-        gantry(7.3);
-        panel(9, 2.4, (bl + br) / 2, 7.3 - 1.0, (g2, W, H) => drawVms(g2, W, H, this.vmsText(line)));
+        gantry(8.4);
+        panel(9, 2.4, (bl + br) / 2, 8.4 - 0.95, (g2, W, H) => drawVms(g2, W, H, this.vmsText(line)));
         break;
       }
       default:
@@ -452,3 +452,4 @@ function drawVms(g: CanvasRenderingContext2D, W: number, H: number, lines: strin
   for (let y = 0; y < H; y += 4) g.fillRect(0, y, W, 1);
   for (let x = 0; x < W; x += 4) g.fillRect(x, 0, 1, H);
 }
+

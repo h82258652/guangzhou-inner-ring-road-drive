@@ -34,7 +34,11 @@ npm install
 npm run dev        # 打开 http://localhost:5173
 npm run build      # 类型检查 + 生产构建（输出 dist/）
 npm test           # 单元测试 + 自动驾驶整圈仿真
+npm run e2e        # Playwright 浏览器冒烟测试（加载城市、开始驾驶并加速）
 ```
+
+`npm run e2e` 默认使用 Playwright 自带的 Chromium（先执行 `npx playwright install chromium`）；
+也可以设置 `PW_CHANNEL=msedge`（或 `chrome`）直接使用本机已安装的浏览器。
 
 ## 操作
 
@@ -86,6 +90,7 @@ src/game/         行程、规则与违章
 src/ui/           HUD、小地图、菜单、触屏
 src/audio/        合成音效
 tests/            Vitest 测试（含整圈自动驾驶仿真）
+e2e/              Playwright 浏览器冒烟测试
 ```
 
 ## 许可与署名

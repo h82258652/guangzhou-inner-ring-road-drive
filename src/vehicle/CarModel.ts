@@ -279,13 +279,14 @@ function lightQuad(b: MeshBuilder, x: number, y: number, z: number, h: number, w
 function plateQuad(b: MeshBuilder, x: number, y: number, dir: number) {
   const w = 0.44;
   const h = 0.14;
-  const z0 = dir > 0 ? w / 2 : -w / 2;
+  // u runs from the viewer's left to right for both plates
+  const z0 = dir > 0 ? -w / 2 : w / 2;
   const z1 = -z0;
   const a = b.vertex(x, y - h / 2, z0, dir, 0, 0, 0, 0);
   const c = b.vertex(x, y - h / 2, z1, dir, 0, 0, 1, 0);
   const d = b.vertex(x, y + h / 2, z1, dir, 0, 0, 1, 1);
   const e = b.vertex(x, y + h / 2, z0, dir, 0, 0, 0, 1);
-  b.quad(a, c, d, e);
+  b.quad(a, e, d, c);
 }
 
 /* ---------------- licence plates ---------------- */
@@ -353,3 +354,4 @@ export const PAINT_COLORS = [
   0xf2f2f0, 0xf2f2f0, 0xf2f2f0, 0xdedede, 0x1b1c1e, 0x1b1c1e, 0x2a2d31, 0x7d8288, 0xa9adb2, 0x9aa3ab, 0x23355f, 0x6e1c1c, 0x8a6d4e, 0x3f4b3a, 0xc7c2b6,
 ];
 export const TAXI_COLOR = 0x5aa7e0;
+

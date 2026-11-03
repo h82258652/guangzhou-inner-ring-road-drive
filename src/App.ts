@@ -12,7 +12,7 @@ import { type Edge, RoadNetwork, newFrame } from './road/Network';
 import { buildRoads, type RoadVisuals } from './road/RoadBuilder';
 import { Environment } from './world/Environment';
 import { envUniforms, roadMaterials, setAnisotropy } from './world/Materials';
-import { buildCity, type CityVisuals } from './world/City';
+import { buildCity, ensureTrees, type CityVisuals } from './world/City';
 import { buildLandmarks, type LandmarkVisuals } from './world/Landmarks';
 import { Signs } from './world/Signs';
 import { Player } from './vehicle/Player';
@@ -139,7 +139,7 @@ export class App {
       this.status('生成城市建筑与珠江…', 0.62);
       await frame();
       const q = QUALITY[this.settings.quality];
-      this.city = buildCity(cityData, { trees: q.trees, infill: true });
+      this.city = buildCity(cityData, { trees: q.trees, infill: q.infill });
       this.scene.add(this.city.group);
       this.status('生成地标…', 0.82);
       await frame();
@@ -194,6 +194,7 @@ export class App {
     this.env.drawDistance = q.drawDistance;
     this.camera.far = q.drawDistance * 6;
     this.camera.updateProjectionMatrix();
+    if (this.city && this.cityData && q.trees) ensureTrees(this.city, this.cityData);
     if (this.city) for (const t of this.city.treeChunks) t.visible = q.trees;
     if (q.bloom && !this.composer) {
       this.composer = new EffectComposer(this.renderer);

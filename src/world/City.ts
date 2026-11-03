@@ -181,6 +181,13 @@ export function buildCity(city: CityFile, opts: { trees: boolean; infill: boolea
   return { group, chunks: [...chunks, ...sgroup.children], treeChunks, terrain };
 }
 
+/** Builds the street trees later, e.g. when switching from the low preset at runtime. */
+export function ensureTrees(vis: CityVisuals, city: CityFile) {
+  if (vis.treeChunks.length) return;
+  vis.treeChunks = buildTrees(city, vis.terrain);
+  for (const t of vis.treeChunks) vis.group.add(t);
+}
+
 function decodeTerrain(t: NonNullable<CityFile['terrain']>): Terrain {
   const bin = atob(t.data);
   const bytes = new Uint8Array(bin.length);

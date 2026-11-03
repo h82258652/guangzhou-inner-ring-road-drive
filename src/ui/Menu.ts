@@ -95,7 +95,7 @@ export class Menu {
           ['taxi', '出租车'],
           ['suv', 'SUV'],
         ])}</div>
-        <div class="field"><label>画质</label>${seg('quality', this.settings.quality, [
+        <div class="field"><label title="低画质会减少城市建筑数量（刷新页面后生效）">画质</label>${seg('quality', this.settings.quality, [
           ['low', '低'],
           ['medium', '中'],
           ['high', '高'],

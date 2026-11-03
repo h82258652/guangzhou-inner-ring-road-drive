@@ -78,10 +78,12 @@ export class Traffic {
   private p = newProjection();
   night = 0;
   enabled = true;
+  private plateRows = 8;
 
   constructor(readonly net: RoadNetwork) {
     this.group.name = 'traffic';
     const atlas = plateAtlas(64, 7);
+    this.plateRows = atlas.rows;
     const paint = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.35, metalness: 0.45 });
     const trim = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.4, metalness: 0.3 });
     const head = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
@@ -629,7 +631,8 @@ export class Traffic {
       ms.head.setColorAt(i, headC);
       ms.tail.setColorAt(i, tailC);
       const pa = ms.plate.geometry.getAttribute('aPlate') as THREE.InstancedBufferAttribute;
-      pa.setXY(i, car.plate % 8, Math.floor(car.plate / 8));
+      // atlas rows count from the top of the canvas; texture v grows upwards
+      pa.setXY(i, car.plate % 8, this.plateRows - 1 - Math.floor(car.plate / 8));
     }
     this.meshes.forEach((ms, k) => {
       for (const im of [ms.body, ms.trim, ms.head, ms.tail, ms.plate]) {
@@ -641,4 +644,5 @@ export class Traffic {
     });
   }
 }
+
 
