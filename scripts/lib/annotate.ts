@@ -317,13 +317,16 @@ export interface CuratedExit {
   namesEn: string[];
   /** keywords used for automatic matching against terminal street names */
   match: string[];
+  /** numbered but not open to traffic (e.g. A5, reserved for the Ruyifang radial) */
+  closed?: boolean;
+  note?: string;
 }
 
 export function matchExits(detected: ExitDetect[], curated: Record<LineId, CuratedExit[]>): ExitFile[] {
   const out: ExitFile[] = [];
   for (const line of ['A', 'B'] as LineId[]) {
     const det = detected.filter((d) => d.line === line);
-    const cur = curated[line];
+    const cur = curated[line].filter((c) => !c.closed);
     // dynamic programming alignment (ordered matching) maximising keyword hits
     const n = det.length;
     const m = cur.length;

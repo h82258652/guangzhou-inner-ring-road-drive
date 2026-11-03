@@ -58,6 +58,22 @@ describe('road network data', () => {
     expect(net.entrances.filter((e) => e.line === 'A').length).toBeGreaterThanOrEqual(12);
   });
 
+  it('numbers exits in driving order; A5 (Ruyifang radial) is not open yet', () => {
+    for (const line of ['A', 'B'] as LineId[]) {
+      const nums = net.exits
+        .filter((x) => x.line === line)
+        .sort((a, b) => a.s - b.s)
+        .map((x) => Number(x.code.slice(1)));
+      for (let k = 1; k < nums.length; k++) expect(nums[k]).toBeGreaterThan(nums[k - 1]);
+    }
+    const a = (code: string) => net.exits.find((x) => x.code === code);
+    expect(a('A5')).toBeUndefined();
+    // A6 leaves on the left towards Huangsha Avenue / the Pearl River Tunnel
+    expect(a('A6')?.side).toBe('left');
+    expect(a('A6')!.names).toContain('珠江隧道');
+    expect(a('B15')!.names).toContain('珠江隧道');
+  });
+
   it('speed limits follow the 60 km/h rule with lower limits on curves and ramps', () => {
     for (const e of net.edges) {
       const max = Math.max(...e.speed);
