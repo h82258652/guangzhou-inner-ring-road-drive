@@ -344,14 +344,16 @@ function appendGeometry(b: MeshBuilder, g: THREE.BufferGeometry, color: THREE.Co
 function plateQuad(b: MeshBuilder, x: number, y: number, dir: number) {
   const w = 0.44;
   const h = 0.14;
-  // u runs from the viewer's left to right for both plates
-  const z0 = dir > 0 ? -w / 2 : w / 2;
+  // u runs from the viewer's left to right for both plates: someone looking at the
+  // front plate faces -X and has +Z on their left; behind the car +Z is on the right
+  const z0 = dir > 0 ? w / 2 : -w / 2;
   const z1 = -z0;
   const a = b.vertex(x, y - h / 2, z0, dir, 0, 0, 0, 0);
   const c = b.vertex(x, y - h / 2, z1, dir, 0, 0, 1, 0);
   const d = b.vertex(x, y + h / 2, z1, dir, 0, 0, 1, 1);
   const e = b.vertex(x, y + h / 2, z0, dir, 0, 0, 0, 1);
-  b.quad(a, e, d, c);
+  // counter-clockwise as seen from the viewer (face normal along dir)
+  b.quad(a, c, d, e);
 }
 
 /* ---------------- licence plates ---------------- */

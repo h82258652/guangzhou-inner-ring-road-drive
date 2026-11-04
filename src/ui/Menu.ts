@@ -9,7 +9,7 @@ export interface StartPoint {
   label: string;
 }
 
-export function startPoints(net: RoadNetwork, line: LineId): StartPoint[] {
+export function startPoints(net: RoadNetwork, line: LineId, mainOnly = false): StartPoint[] {
   const out: StartPoint[] = [];
   const L = net.lines[line].length;
   const seen = new Set<string>();
@@ -21,6 +21,7 @@ export function startPoints(net: RoadNetwork, line: LineId): StartPoint[] {
     seen.add(label);
     out.push({ id: `main:${Math.round(s + 40)}`, label });
   }
+  if (mainOnly) return out;
   net.entrances.forEach((en, i) => {
     if (en.line !== line) return;
     out.push({ id: `ramp:${i}`, label: `入口 · ${en.name}${en.side === 'left' ? '（左侧汇入）' : ''}` });
@@ -51,8 +52,11 @@ export class Menu {
 
   showMain() {
     const o = this.settings.options;
-    const starts = startPoints(this.net, o.line);
+    const race = o.mode === 'race';
+    // races start from a grid on the main line
+    const starts = startPoints(this.net, o.line, race);
     if (!starts.find((s) => s.id === o.start)) o.start = starts[0].id;
+    const L = this.net.lines[o.line].length;
     const exits = this.net.exits.filter((x) => x.line === o.line && x.code).sort((a, b) => Number(a.code.slice(1)) - Number(b.code.slice(1)));
     if (!exits.find((x) => x.code === o.destination)) o.destination = exits[Math.min(6, exits.length - 1)]?.code ?? '';
     this.el.innerHTML = `
@@ -67,8 +71,29 @@ export class Menu {
           ['free', '自由驾驶'],
           ['trip', '行程模式'],
           ['lap', '计圈挑战'],
+          ['race', '竞速模式'],
         ])}</div>
-        <div class="field"><label>起点</label><select data-name="start">${starts
+        ${
+          race
+            ? `<div class="field"><label>赛程</label>${seg('raceLength', o.raceLength, [
+                ['short', '冲刺 5 km'],
+                ['half', `半圈 ${(L / 2000).toFixed(1)} km`],
+                ['lap', `一圈 ${(L / 1000).toFixed(1)} km`],
+              ])}</div>
+        <div class="field"><label>对手</label>${seg('raceRivals', String(o.raceRivals), [
+          ['3', '3 辆'],
+          ['5', '5 辆'],
+          ['7', '7 辆'],
+        ])}</div>
+        <div class="field"><label>对手水平</label>${seg('raceLevel', o.raceLevel, [
+          ['easy', '新手'],
+          ['normal', '老司机'],
+          ['hard', '车神'],
+        ])}</div>
+        <div class="note">竞速模式无视一切交通法规：不限速、不拍照、不记违章。从最后一排发车，先冲过终点线者胜；驶离主线可按 <kbd>R</kbd> 回到赛道。</div>`
+            : ''
+        }
+        <div class="field"><label>${race ? '发车位置' : '起点'}</label><select data-name="start">${starts
           .map((s) => `<option value="${s.id}" ${s.id === o.start ? 'selected' : ''}>${escapeHtml(s.label)}</option>`)
           .join('')}</select></div>
         <div class="field ${o.mode === 'trip' ? '' : 'hidden'}" data-dest><label>终点出口</label><select data-name="destination">${exits
@@ -86,6 +111,7 @@ export class Menu {
           ['rain', '雨'],
         ])}</div>
         <div class="field"><label>车流</label>${seg('traffic', o.traffic, [
+          ['none', '无'],
           ['sparse', '稀疏'],
           ['normal', '正常'],
           ['rush', '早晚高峰'],
@@ -100,7 +126,7 @@ export class Menu {
           ['medium', '中'],
           ['high', '高'],
         ])}</div>
-        <button class="primary" data-act="start">开 始 驾 驶</button>
+        <button class="primary" data-act="start">${race ? '开 始 比 赛' : '开 始 驾 驶'}</button>
         <div class="row"><button class="ghost" data-act="help">操作说明</button></div>
         <div class="credits">地图数据 © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> 贡献者（ODbL）· 纹理 Poly Haven（CC0）· 高程 AWS Terrain Tiles · 本游戏为 GPL-3.0 开源项目，场景为近似还原，请勿用于实际导航。</div>
       </div>`;
@@ -118,7 +144,8 @@ export class Menu {
           if (name === 'quality') {
             this.settings.quality = v as Quality;
             this.onSettings({ quality: v as Quality });
-          } else (o as unknown as Record<string, string>)[name] = v;
+          } else if (name === 'raceRivals') o.raceRivals = Number(v);
+          else (o as unknown as Record<string, string>)[name] = v;
           if (name === 'line' || name === 'mode') this.showMain();
           else {
             segEl.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
@@ -148,7 +175,9 @@ export class Menu {
       支持手柄（RT 油门 / LT 刹车 / 左摇杆转向）和触屏。<br/><br/>
       <b>拟真规则</b>：内环路限速 60 km/h，弯道与匝道 30–40 km/h；沿线设有定点测速与区间测速；
       驶过导流线、压实线变道、碰撞护栏都会被记录。部分出入口位于<b>左侧</b>，请留意指路标志。
-      驶入出口匝道到达地面道路即完成行程，可选择换线继续。
+      驶入出口匝道到达地面道路即完成行程，可选择换线继续。<br/><br/>
+      <b>竞速模式</b>：与 AI 车手在内环路上比赛，无视一切交通法规（不限速、不拍照、不记违章），
+      车辆换上竞速调校。倒数结束后起步，先跑完赛程者胜；驶离主线可按 <kbd>R</kbd> 回到赛道。
     </div><button class="primary" data-act="back">返 回</button></div>`;
     this.el.classList.remove('hidden');
     this.el.querySelector('[data-act="back"]')!.addEventListener('click', back);

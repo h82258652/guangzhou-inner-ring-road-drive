@@ -2,7 +2,7 @@
 export type Quality = 'low' | 'medium' | 'high';
 export type TimeOfDay = 'dawn' | 'day' | 'dusk' | 'night';
 export type WeatherSetting = 'clear' | 'cloudy' | 'rain';
-export type Mode = 'free' | 'trip' | 'lap';
+export type Mode = 'free' | 'trip' | 'lap' | 'race';
 export type CarChoice = 'sedan' | 'taxi' | 'suv';
 
 export interface GameOptions {
@@ -12,8 +12,12 @@ export interface GameOptions {
   destination: string;
   time: TimeOfDay;
   weather: WeatherSetting;
-  traffic: 'sparse' | 'normal' | 'rush';
+  traffic: 'none' | 'sparse' | 'normal' | 'rush';
   car: CarChoice;
+  /** race mode: distance, number of AI opponents and their level */
+  raceLength: 'short' | 'half' | 'lap';
+  raceRivals: number;
+  raceLevel: 'easy' | 'normal' | 'hard';
 }
 
 export interface Settings {
@@ -40,7 +44,7 @@ export function defaultSettings(): Settings {
     volume: 0.7,
     steerSensitivity: 1,
     showFps: true,
-    options: { line: 'A', mode: 'free', start: 'main:0', destination: '', time: 'day', weather: 'clear', traffic: 'normal', car: 'sedan' },
+    options: { line: 'A', mode: 'free', start: 'main:0', destination: '', time: 'day', weather: 'clear', traffic: 'normal', car: 'sedan', raceLength: 'short', raceRivals: 5, raceLevel: 'normal' },
   };
 }
 

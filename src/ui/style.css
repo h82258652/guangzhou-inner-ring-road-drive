@@ -211,6 +211,23 @@ select {
 .row > * {
   flex: 1;
 }
+.note {
+  margin: 4px 0 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #ffe4a3;
+  background: rgba(255, 180, 0, 0.1);
+  border: 1px solid rgba(255, 180, 0, 0.3);
+  border-radius: 8px;
+}
+.note kbd {
+  padding: 0 5px;
+  border-radius: 4px;
+  background: #2a333c;
+  border: 1px solid #44505c;
+  font-family: inherit;
+}
 .credits {
   margin-top: 16px;
   font-size: 11px;
@@ -473,6 +490,113 @@ select {
   transform: translateX(-50%);
   font-size: 11px;
   color: var(--muted);
+}
+
+/* ---------- race ---------- */
+.racepanel {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 18px;
+  background: rgba(12, 16, 22, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+.racepanel .pos b {
+  font-size: 40px;
+  color: var(--accent);
+  line-height: 1;
+}
+.racepanel .pos span {
+  font-size: 18px;
+  color: var(--muted);
+}
+.racepanel .pos small {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 2px;
+}
+.racepanel .clock {
+  font-size: 24px;
+  font-weight: bold;
+  font-variant-numeric: tabular-nums;
+}
+.racepanel .togo {
+  font-size: 13px;
+  color: #cfd8df;
+}
+.racepanel .bar {
+  width: 160px;
+  height: 4px;
+  margin-top: 4px;
+}
+.racepanel .warn {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 8px;
+  white-space: nowrap;
+  padding: 6px 14px;
+  border-radius: 8px;
+  background: rgba(200, 30, 30, 0.9);
+  font-weight: bold;
+  letter-spacing: 1px;
+}
+.hud.racing .nextexit,
+.hud.racing .guidance {
+  display: none !important;
+}
+.hud.racing .stats {
+  text-align: left;
+  min-width: 190px;
+}
+.standing {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.75;
+  white-space: nowrap;
+}
+.standing .k {
+  width: 14px;
+  color: var(--muted);
+}
+.standing i {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+.standing .n {
+  flex: 1;
+}
+.standing .g {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.standing.me .n {
+  color: var(--accent);
+  font-weight: bold;
+}
+.countdown {
+  position: absolute;
+  top: 42%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 120px;
+  font-weight: bold;
+  color: #fff;
+  text-shadow: 0 0 30px rgba(0, 0, 0, 0.7);
+}
+.countdown.go {
+  color: #3ccf7e;
 }
 
 /* ---------- result ---------- */

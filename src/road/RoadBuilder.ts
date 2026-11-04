@@ -9,6 +9,7 @@ import * as THREE from 'three';
 import { ChunkedBuilder, MeshBuilder } from '../world/MeshBuilder';
 import { roadMaterials } from '../world/Materials';
 import { type Edge, type RoadNetwork, newFrame, type RoadFrame } from './Network';
+import { BARRIER_WIDTH, DeckIndex, GIRDER_DEPTH, TRAFFIC_HEADROOM } from './Clearance';
 
 const WHITE = new THREE.Color(0.92, 0.92, 0.9);
 // linear-space road paint yellow (≈ sRGB #EDB627)
@@ -38,7 +39,7 @@ export interface RoadVisuals {
   pavement: { arrows: number; numerals: number };
 }
 
-export function buildRoads(net: RoadNetwork): RoadVisuals {
+export function buildRoads(net: RoadNetwork, decks: DeckIndex = new DeckIndex(net)): RoadVisuals {
   const mats = roadMaterials();
   const cb = new ChunkedBuilder(400);
   const f = newFrame();
@@ -58,8 +59,8 @@ export function buildRoads(net: RoadNetwork): RoadVisuals {
     buildMarkings(e, cb, f, f2);
     buildBarriers(e, cb, f);
     buildStructure(e, cb, f);
-    buildPiers(e, net, piers, caps, f);
-    buildLamps(e, lampPoles, lampHeads, lampPositions, f);
+    buildPiers(e, decks, piers, caps);
+    buildLamps(e, decks, lampPoles, lampHeads, lampPositions);
     buildCushions(e, cushions, f);
   }
   const pavement = buildRoadText(net, cb, f);
@@ -713,88 +714,145 @@ function girderSegment(e: Edge, cb: ChunkedBuilder, f: RoadFrame, i0: number, i1
   }
 }
 
-/** Piers every ~30 m; portal frames where a lower deck runs underneath. */
-function buildPiers(e: Edge, net: RoadNetwork, piers: THREE.Matrix4[], caps: THREE.Matrix4[], f: RoadFrame) {
-  const m = new THREE.Matrix4();
-  const q = new THREE.Quaternion();
-  const up = new THREE.Vector3(0, 1, 0);
-  const proj = { s: 0, d: 0, dist: 0 };
+/**
+ * Piers every ~30 m: a single column with a hammerhead cap, or a portal frame
+ * straddling decks that run underneath. Columns never stand in a roadway or
+ * pass through another deck; a pier that cannot be placed is moved a few
+ * metres along the deck or left out.
+ */
+/** A vertical (cylinder) or horizontal (box) piece of a pier: centre x/z, vertical extent, heading of the deck. */
+export interface PierPart {
+  x: number;
+  z: number;
+  y0: number;
+  y1: number;
+  heading: number;
+  /** boxes only: size along and across the deck */
+  along?: number;
+  across?: number;
+}
+
+export const PIER_RADIUS = 0.95;
+
+/** Columns and caps of an edge's piers (see buildPiers). */
+export function pierSpots(e: Edge, decks: DeckIndex): { columns: PierPart[]; caps: PierPart[] } {
+  const f = newFrame();
+  const columns: PierPart[] = [];
+  const caps: PierPart[] = [];
   const start = (e.id * 7.3) % PIER_SPACING;
-  for (let s = start + 8; s < e.length - 4; s += PIER_SPACING) {
+  const R = PIER_RADIUS;
+  const tryAt = (s: number): boolean => {
     const i = e.idx(s);
-    const y = e.y[i];
-    if (y < 4.5) continue;
+    const y = e.yAt(s);
+    if (y < 4.5) return true;
     e.frame(s, 0, f);
-    const mid = (e.bl[i] + e.br[i]) / 2;
-    const width = e.br[i] - e.bl[i] + 1.04;
+    const bl = e.blAt(s);
+    const br = e.brAt(s);
+    const mid = (bl + br) / 2;
+    const width = br - bl + 1.04;
     const topY = y - 1.9;
     const groundY = e.struct[i] === 2 ? -1.0 : 0;
     const heading = Math.atan2(f.tz, f.tx);
-    q.setFromAxisAngle(up, -heading);
-    // find lower decks below this pier
-    let blockLo = Infinity;
-    let blockHi = -Infinity;
-    for (const o of net.edgesNear(f.x, f.z, 30)) {
-      if (o === e) continue;
-      o.project(f.x + f.nx * mid, f.z + f.nz * mid, o.length / 2, proj, o.n);
-      if (proj.s < 0 || proj.s > o.length) continue;
-      const oy = o.yAt(proj.s);
-      if (oy > topY - 2.5) continue;
-      const oi = o.idx(proj.s);
-      const halfO = Math.max(-o.bl[oi], o.br[oi]) + 1.2;
-      if (proj.dist > halfO + 1.5) continue;
-      // lateral extent of the lower deck in this pier's frame
-      const cx = o.x[oi];
-      const cz = o.z[oi];
-      const along = (cx - f.x) * f.nx + (cz - f.z) * f.nz;
-      blockLo = Math.min(blockLo, along - halfO);
-      blockHi = Math.max(blockHi, along + halfO);
+    const at = (d: number) => [f.x + f.nx * d, f.z + f.nz * d] as const;
+    // decks at this level are carried by the pier; anything lower must be kept clear of
+    const lower = (d: number, r: number, margin: number) =>
+      decks.at(...at(d), r, margin).filter((h) => h.edge !== e && h.y < y - 1.2 && h.y - GIRDER_DEPTH < topY && h.y + TRAFFIC_HEADROOM > groundY);
+    if (!lower(mid, R, BARRIER_WIDTH).length) {
+      const [x, z] = at(mid);
+      columns.push({ x, z, y0: groundY, y1: topY - 1.2, heading });
+      caps.push({ x, z, y0: topY - 1.25, y1: topY, heading, along: 1.8, across: Math.max(3, width * 0.75) });
+      return true;
     }
-    const capW = Math.max(3, width * 0.75);
-    const place = (d: number, h: number, base: number) => {
-      const px = f.x + f.nx * d;
-      const pz = f.z + f.nz * d;
-      m.compose(new THREE.Vector3(px, base, pz), q, new THREE.Vector3(1, h, 1));
-      piers.push(m.clone());
-    };
-    if (blockLo < Infinity) {
-      const lo = Math.min(blockLo, mid - 1);
-      const hi = Math.max(blockHi, mid + 1);
-      if (hi - lo > 34) continue;
-      // portal: two columns outside the lower deck + cross beam
-      place(lo - 1.0, topY - groundY, groundY);
-      place(hi + 1.0, topY - groundY, groundY);
-      const beamW = hi - lo + 3.2;
-      const cxm = (lo + hi) / 2;
-      m.compose(new THREE.Vector3(f.x + f.nx * cxm, topY, f.z + f.nz * cxm), q, new THREE.Vector3(1.6, 1.5, beamW));
-      caps.push(m.clone());
-      continue;
+    // portal: find the decks crossing underneath and stand the columns just outside them
+    const blocked = (d: number) => lower(d, 0, BARRIER_WIDTH + R + 0.3).length > 0;
+    let lo = mid;
+    let hi = mid;
+    while (blocked(lo) && mid - lo < 20) lo -= 0.25;
+    while (blocked(hi) && hi - mid < 20) hi += 0.25;
+    if (hi - lo > 34 || blocked(lo) || blocked(hi)) return false;
+    for (const d of [lo, hi]) if (lower(d, R, BARRIER_WIDTH).length) return false;
+    for (const d of [lo, hi]) {
+      const [x, z] = at(d);
+      columns.push({ x, z, y0: groundY, y1: topY, heading });
     }
-    place(mid, topY - groundY - 1.2, groundY);
-    m.compose(new THREE.Vector3(f.x + f.nx * mid, topY, f.z + f.nz * mid), q, new THREE.Vector3(1.8, 1.25, capW));
+    // the cross beam sits within the depth of the deck's girder, above the traffic underneath
+    const [x, z] = at((lo + hi) / 2);
+    caps.push({ x, z, y0: topY, y1: topY + 1.45, heading, along: 1.6, across: hi - lo + 2.2 });
+    return true;
+  };
+  for (let s = start + 8; s < e.length - 4; s += PIER_SPACING) {
+    for (const shift of [0, 4, -4, 8, -8, 12, -12]) {
+      const ss = s + shift;
+      if (ss > 2 && ss < e.length - 2 && tryAt(ss)) break;
+    }
+  }
+  return { columns, caps };
+}
+
+/** Piers every ~30 m (see pierSpots): instance matrices for the column cylinders and cap boxes. */
+function buildPiers(e: Edge, decks: DeckIndex, piers: THREE.Matrix4[], caps: THREE.Matrix4[]) {
+  const m = new THREE.Matrix4();
+  const q = new THREE.Quaternion();
+  const up = new THREE.Vector3(0, 1, 0);
+  const spots = pierSpots(e, decks);
+  for (const c of spots.columns) {
+    q.setFromAxisAngle(up, -c.heading);
+    m.compose(new THREE.Vector3(c.x, c.y0, c.z), q, new THREE.Vector3(1, c.y1 - c.y0, 1));
+    piers.push(m.clone());
+  }
+  // cap geometry hangs below its origin: place it at the top face
+  for (const c of spots.caps) {
+    q.setFromAxisAngle(up, -c.heading);
+    m.compose(new THREE.Vector3(c.x, c.y1, c.z), q, new THREE.Vector3(c.along!, c.y1 - c.y0, c.across!));
     caps.push(m.clone());
   }
 }
 
-function buildLamps(e: Edge, poles: THREE.Matrix4[], heads: THREE.Matrix4[], positions: THREE.Vector3[], f: RoadFrame) {
-  const m = new THREE.Matrix4();
-  const q = new THREE.Quaternion();
-  const up = new THREE.Vector3(0, 1, 0);
+/** Street light: pole foot on the barrier top, head 2.6 m over the road. */
+export interface LampSpot {
+  x: number;
+  z: number;
+  /** pole foot height */
+  y: number;
+  hx: number;
+  hz: number;
+  heading: number;
+}
+
+export const LAMP_HEIGHT = 10.75;
+
+/** Street lights along the right barrier of an edge, left out where a pole or arm would meet another deck. */
+export function lampSpots(e: Edge, decks: DeckIndex): LampSpot[] {
+  const f = newFrame();
+  const out: LampSpot[] = [];
   for (let s = 18; s < e.length; s += LAMP_SPACING) {
     const i = e.idx(s);
     if (e.or[i] >= 0) continue;
     e.frame(s, e.br[i] + 0.35, f);
     const y = e.y[i] + 1.05;
-    const heading = Math.atan2(f.tz, f.tx);
-    // pole local -X points to the road (left of the outward normal)
-    q.setFromAxisAngle(up, -heading - Math.PI / 2);
-    m.compose(new THREE.Vector3(f.x, y, f.z), q, new THREE.Vector3(1, 1, 1));
-    poles.push(m.clone());
+    // the pole stands on the barrier and the arm reaches 2.6 m over the road: under a deck above
+    // (double-deck sections) or next to another roadway there is no room for it
+    if (!decks.clear(f.x, f.z, 0.16, y, y + 11, [e])) continue;
     const hx = f.x - f.nx * 2.6;
     const hz = f.z - f.nz * 2.6;
-    m.compose(new THREE.Vector3(hx, y + 10.75, hz), q, new THREE.Vector3(1, 1, 1));
+    if (!decks.clear(hx, hz, 0.5, y + 9.8, y + 11.3, [e])) continue;
+    out.push({ x: f.x, z: f.z, y, hx, hz, heading: Math.atan2(f.tz, f.tx) });
+  }
+  return out;
+}
+
+function buildLamps(e: Edge, decks: DeckIndex, poles: THREE.Matrix4[], heads: THREE.Matrix4[], positions: THREE.Vector3[]) {
+  const m = new THREE.Matrix4();
+  const q = new THREE.Quaternion();
+  const up = new THREE.Vector3(0, 1, 0);
+  for (const l of lampSpots(e, decks)) {
+    // pole local -X points to the road (left of the outward normal)
+    q.setFromAxisAngle(up, -l.heading - Math.PI / 2);
+    m.compose(new THREE.Vector3(l.x, l.y, l.z), q, new THREE.Vector3(1, 1, 1));
+    poles.push(m.clone());
+    m.compose(new THREE.Vector3(l.hx, l.y + LAMP_HEIGHT, l.hz), q, new THREE.Vector3(1, 1, 1));
     heads.push(m.clone());
-    positions.push(new THREE.Vector3(hx, y + 10.6, hz));
+    positions.push(new THREE.Vector3(l.hx, l.y + 10.6, l.hz));
   }
 }
 

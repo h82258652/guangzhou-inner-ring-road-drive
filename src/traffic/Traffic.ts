@@ -11,7 +11,7 @@ import { buildVehicleGeometry, indicatorMaterial, PAINT_COLORS, plateAtlas, TAXI
 import { clamp, mulberry32 } from '../shared/math';
 import type { ExitFile, LineId } from '../shared/types';
 
-export type Density = 'sparse' | 'normal' | 'rush';
+export type Density = 'none' | 'sparse' | 'normal' | 'rush';
 
 const KINDS: { kind: VehicleKind; w: number }[] = [
   { kind: 'sedan', w: 0.42 },
@@ -23,8 +23,14 @@ const KINDS: { kind: VehicleKind; w: number }[] = [
   { kind: 'bus', w: 0.03 },
 ];
 const MAX_PER_KIND = 260;
-const DENSITY: Record<Density, number> = { sparse: 4.5, normal: 11, rush: 30 };
+const DENSITY: Record<Density, number> = { none: 0, sparse: 4.5, normal: 11, rush: 30 };
 const WINDOW = 1500;
+/** share of drivers leaving at any given exit */
+const EXIT_SHARE = 0.25;
+/** chance per spawn tick (0.5 s) of feeding a car into an entrance ramp */
+const RAMP_SPAWN: Record<Density, number> = { none: 0, sparse: 0.25, normal: 0.5, rush: 0.6 };
+/** cars kept on the ramp of the next entrance ahead of the player */
+const RAMP_FEED: Record<Density, number> = { none: 0, sparse: 1, normal: 2, rush: 3 };
 
 export interface Car {
   id: number;
@@ -63,6 +69,23 @@ export interface Car {
   prepTries: number;
   /** hazard lights after a collision (seconds left) */
   hazard: number;
+  /** last exit the car has decided about (each exit is considered once) */
+  rolled: ExitFile | null;
+  /** entrance ramp car timed to merge just ahead of the player */
+  meet: EntranceChain | null;
+  /** in the acceleration lane, letting the player catch up before merging */
+  waitForPlayer: boolean;
+}
+
+interface EntranceChain {
+  line: LineId;
+  /** arc length of the merge point on the line */
+  s: number;
+  /** ramp edges from the first one to the edge that merges */
+  chain: Edge[];
+  length: number;
+  /** distance from the start of the chain to where a car waiting to merge stops (0: nowhere to wait) */
+  hold: number;
 }
 
 export interface PlayerProxy {
@@ -101,9 +124,61 @@ export class Traffic {
   night = 0;
   enabled = true;
   private plateRows = 8;
+  /** body length / width per vehicle kind */
+  private dims = KINDS.map(({ kind }) => ({ len: VEHICLES[kind].length, width: VEHICLES[kind].width }));
 
-  constructor(readonly net: RoadNetwork) {
+  /**
+   * Ramp edges that end in an acceleration lane: sample index where the trailing
+   * open (merge) zone towards a main line begins, and the arc length where the
+   * tapering lane becomes too narrow to drive on (merging cars must be across by then).
+   */
+  private mergeZone = new Map<number, { start: number; stopS: number }>();
+  /** entrance ramps: ramp chain from its first edge to the merging edge */
+  private entranceChains: EntranceChain[] = [];
+
+  /** `render: false` runs the simulation without GPU resources (tests, tools). */
+  constructor(
+    readonly net: RoadNetwork,
+    opts: { render?: boolean } = {},
+  ) {
     this.group.name = 'traffic';
+    for (const e of net.edges) {
+      if (e.kind !== 'ramp') continue;
+      const last = e.n - 1;
+      const side = e.ol[last] >= 0 ? -1 : e.or[last] >= 0 ? 1 : 0;
+      if (!side) continue;
+      const openTo = (i: number) => (side < 0 ? e.ol[i] : e.or[i]);
+      const target = net.edges[openTo(last)];
+      // an acceleration lane ends where the ramp joins that line (some exit ramps run alongside the line up to their end)
+      if (target.kind !== 'main' || !e.succ.some((n) => n.kind === 'main' && n.line === target.line)) continue;
+      // the merge zone is the open run that reaches the end of the edge (diverge zones touch its start)
+      let k = last;
+      while (k > 0 && openTo(k - 1) >= 0 && net.edges[openTo(k - 1)].kind === 'main' && net.edges[openTo(k - 1)].line === target.line) k--;
+      let stopS = e.length;
+      for (let i = k; i <= last; i++)
+        if (e.lanes[i] < 0.7) {
+          stopS = i * e.ds;
+          break;
+        }
+      this.mergeZone.set(e.id, { start: k, stopS });
+    }
+    for (const en of net.entrances) {
+      // up the ramp; where two ramps join, follow the longer one
+      const chain = [net.edges[en.edge]];
+      for (let k = 0; k < 6; k++) {
+        const up = chain[0].pred.filter((p) => p.kind === 'ramp' && !chain.includes(p)).sort((a, b) => b.length - a.length)[0];
+        if (!up) break;
+        chain.unshift(up);
+      }
+      const length = chain.reduce((a, e) => a + e.length, 0);
+      const last = chain[chain.length - 1];
+      const mz = this.mergeZone.get(last.id);
+      this.entranceChains.push({ line: en.line, s: en.s, chain, length, hold: mz ? length - last.length + mz.stopS : 0 });
+    }
+    if (opts.render !== false) this.initMeshes();
+  }
+
+  private initMeshes() {
     const atlas = plateAtlas(64, 7);
     this.plateRows = atlas.rows;
     const paint = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.35, metalness: 0.45 });
@@ -164,7 +239,7 @@ export class Traffic {
   private makeCar(edge: Edge, s: number, lane: number, v: number): Car {
     const kindIdx = this.pickKind();
     const kind = KINDS[kindIdx].kind;
-    const m = this.meshes[kindIdx];
+    const m = this.dims[kindIdx];
     const color = new THREE.Color(kind === 'taxi' ? TAXI_COLOR : kind === 'bus' ? 0x2e9a5a : PAINT_COLORS[Math.floor(this.rnd() * PAINT_COLORS.length)]);
     const rush = this.density === 'rush';
     const d = edge.laneCenter(s, lane);
@@ -201,28 +276,44 @@ export class Traffic {
       prepT: 0,
       prepTries: 0,
       hazard: 0,
+      rolled: null,
+      meet: null,
+      waitForPlayer: false,
     };
     this.planExit(car);
+    this.pose(car);
     return car;
   }
 
-  /** Choose whether to take the next exit on the current line. */
+  /** Decide (once per exit) whether the car leaves at the next exit of its line. */
   private planExit(car: Car) {
     car.exit = null;
     if (car.edge.kind !== 'main' || !car.edge.line) return;
     const ls = this.net.lineS(car.edge, car.s)!;
     const L = this.net.lines[car.edge.line].length;
-    const exits = this.net.exits.filter((x) => x.line === car.edge.line);
     let best: ExitFile | null = null;
     let bd = Infinity;
-    for (const x of exits) {
+    for (const x of this.net.exits) {
+      if (x.line !== car.edge.line) continue;
       const dist = (((x.s - ls) % L) + L) % L;
       if (dist > 80 && dist < bd) {
         bd = dist;
         best = x;
       }
     }
-    if (best && this.rnd() < 0.16) car.exit = best;
+    if (!best || best === car.rolled) return;
+    car.rolled = best;
+    if (this.rnd() < EXIT_SHARE) car.exit = best;
+  }
+
+  /** World pose from (edge, s, d). */
+  private pose(car: Car) {
+    const fr = car.edge.frame(car.s, car.d, this.f);
+    car.x = fr.x;
+    car.y = car.edge.yAt(car.s);
+    car.z = fr.z;
+    const latV = clamp(car.dTarget - car.d, -1.1, 1.1);
+    car.heading = Math.atan2(fr.tz, fr.tx) + Math.atan2(latV, Math.max(car.v, 3)) * 0.8;
   }
 
   /** Initial population around the player position on both lines. */
@@ -253,6 +344,7 @@ export class Traffic {
 
   private fillLine(line: LineId, s0: number, s1: number, avoid: number) {
     const perLaneKm = DENSITY[this.density];
+    if (perLaneKm <= 0) return;
     const spacing = 1000 / perLaneKm;
     for (let s = s0; s < s1; s += spacing * (0.6 + this.rnd() * 0.8)) {
       if (Math.abs(s - avoid) < 45) continue;
@@ -269,7 +361,7 @@ export class Traffic {
     }
   }
 
-  private bucketize(player: PlayerProxy | null) {
+  private bucketize(player: PlayerProxy | null, others: PlayerProxy[]) {
     this.buckets.clear();
     const add = (o: Car | PlayerProxy) => {
       let a = this.buckets.get(o.edge.id);
@@ -278,6 +370,7 @@ export class Traffic {
     };
     for (const c of this.cars) if (c.alive) add(c);
     if (player) add(player);
+    for (const o of others) add(o);
     for (const a of this.buckets.values()) a.sort((p, q) => p.s - q.s);
   }
 
@@ -350,10 +443,14 @@ export class Traffic {
     return clamp(a, -9, car.amax);
   }
 
-  update(dt: number, player: PlayerProxy | null, focus: THREE.Vector3) {
+  /**
+   * @param player the player's car (also the focus for spawning); null in the menu
+   * @param others further vehicles the traffic must respect (race opponents)
+   */
+  update(dt: number, player: PlayerProxy | null, focus: THREE.Vector3, others: PlayerProxy[] = []) {
     if (!this.enabled) return;
     this.time += dt;
-    this.bucketize(player);
+    this.bucketize(player, others);
     const half = (c: Car) => c.width / 2;
     for (const car of this.cars) {
       if (!car.alive) continue;
@@ -361,12 +458,22 @@ export class Traffic {
       const limit = e.speedAt(car.s) / 3.6;
       // look ahead for lower limits
       const aheadLimit = e.speedAt(Math.min(e.length, car.s + 60)) / 3.6;
-      const v0 = Math.min(limit, aheadLimit) * car.v0f;
+      let v0 = Math.min(limit, aheadLimit) * car.v0f;
+      if (car.meet) v0 = this.meetSpeed(car, player, v0);
       const lead = this.leader(car, car.d, half(car));
       let a = this.idm(car, v0, lead);
-      // ramps that taper out: stop before the end if not merged
-      if (e.kind === 'ramp' && !e.succ.length) {
-        // terminal ramp: just continue (despawn at the end)
+      // acceleration lane: until the car is cleared to merge, the end of the taper acts like a stop line
+      const mz = e.kind === 'ramp' ? this.mergeZone.get(e.id) : undefined;
+      if (mz && car.s < mz.stopS && car.dTarget >= e.blAt(car.s) && car.dTarget <= e.brAt(car.s)) {
+        const gap = mz.stopS - car.s - car.len / 2;
+        if (gap < 150) a = Math.min(a, this.idm(car, v0, { gap, v: 0 }));
+      }
+      // a car timed for the player waits at the hold point of its ramp (which may lie on an earlier ramp edge)
+      if (car.meet && car.waitForPlayer) {
+        const k = car.meet.chain.indexOf(e);
+        let pos = car.s;
+        for (let j = 0; j < k; j++) pos += car.meet.chain[j].length;
+        if (k >= 0) a = Math.min(a, this.idm(car, v0, { gap: Math.max(0.1, car.meet.hold - pos - car.len / 2), v: 0 }));
       }
       if (car.bumped > 0) {
         car.bumped -= dt;
@@ -389,14 +496,16 @@ export class Traffic {
         }
       }
       this.laneLogic(car, dt);
-      const latRate = 1.1 * dt;
+      // lateral speed: about a lane in 3 s at speed, slower when crawling
+      const latRate = Math.min(1.1, 0.3 + car.v * 0.12) * dt;
       car.d += clamp(car.dTarget - car.d, -latRate, latRate);
       this.updateIndicators(car, dt);
 
-      // open side transfer (exits / merges)
+      // open side transfer (exits / merges) — only when the car means to cross, so that slightly
+      // different bounds of the two decks cannot bounce it back and forth
       const i = car.edge.idx(car.s);
-      if (car.d > car.edge.br[i] && car.edge.or[i] >= 0) this.transfer(car, this.net.edges[car.edge.or[i]]);
-      else if (car.d < car.edge.bl[i] && car.edge.ol[i] >= 0) this.transfer(car, this.net.edges[car.edge.ol[i]]);
+      if (car.d > car.edge.br[i] && car.dTarget > car.edge.br[i] && car.edge.or[i] >= 0) this.transfer(car, this.net.edges[car.edge.or[i]]);
+      else if (car.d < car.edge.bl[i] && car.dTarget < car.edge.bl[i] && car.edge.ol[i] >= 0) this.transfer(car, this.net.edges[car.edge.ol[i]]);
 
       // edge end
       while (car.alive && car.s > car.edge.length) {
@@ -406,13 +515,14 @@ export class Traffic {
           break;
         }
         car.s -= car.edge.length;
-        // keep the world position continuous
+        // keep the world position continuous (the centrelines of consecutive edges may be offset)
         const fr = car.edge.frame(car.edge.length, car.d, this.f);
         nx.project(fr.x, fr.z, car.s, this.p, 12);
         car.edge = nx;
-        if (car.prepD !== null) car.prepD += this.p.d - car.d;
+        const shift = this.p.d - car.d;
+        if (car.prepD !== null) car.prepD += shift;
         car.d = this.p.d;
-        car.dTarget = clamp(car.dTarget, nx.blAt(car.s) + car.width / 2, nx.brAt(car.s) - car.width / 2);
+        car.dTarget = clamp(car.dTarget + shift, nx.blAt(car.s) + car.width / 2, nx.brAt(car.s) - car.width / 2);
         if (nx.kind === 'main' && (!car.exit || car.exit.line !== nx.line)) this.planExit(car);
       }
       if (!car.alive) continue;
@@ -421,20 +531,14 @@ export class Traffic {
       const br = car.edge.brAt(car.s);
       if (car.edge.ol[car.edge.idx(car.s)] < 0) car.d = Math.max(car.d, bl + car.width / 2);
       if (car.edge.or[car.edge.idx(car.s)] < 0) car.d = Math.min(car.d, br - car.width / 2);
-      // pose
-      const fr = car.edge.frame(car.s, car.d, this.f);
-      car.x = fr.x;
-      car.y = car.edge.yAt(car.s);
-      car.z = fr.z;
-      const latV = clamp(car.dTarget - car.d, -1.1, 1.1);
-      car.heading = Math.atan2(fr.tz, fr.tx) + Math.atan2(latV, Math.max(car.v, 3)) * 0.8;
+      this.pose(car);
       // despawn far away
       const dx = car.x - focus.x;
       const dz = car.z - focus.z;
       if (dx * dx + dz * dz > (WINDOW + 300) ** 2) car.alive = false;
     }
     this.cars = this.cars.filter((c) => c.alive);
-    this.spawn(dt, player, focus);
+    this.spawn(dt, player, focus, others);
   }
 
   private laneLogic(car: Car, _dt: number) {
@@ -443,12 +547,14 @@ export class Traffic {
     const lw = e.laneWidth;
     const curLane = clamp(e.laneIndex(car.s, car.dTarget), 0, Math.max(0, Math.ceil(lanes) - 1));
     const laneCenter = (k: number) => e.laneCenter(car.s, k);
-    // merging from a ramp onto the main line through an open side
+    // merging from an entrance ramp onto the main line through the open side of the acceleration lane
+    // (the open side at the start of an exit ramp is the deceleration lane: cars keep going)
     const i = e.idx(car.s);
-    if (e.kind === 'ramp' && (e.ol[i] >= 0 || e.or[i] >= 0)) {
+    const mz = e.kind === 'ramp' ? this.mergeZone.get(e.id) : undefined;
+    if (mz && i >= mz.start && (e.ol[i] >= 0 || e.or[i] >= 0)) {
       const sideRight = e.or[i] >= 0;
       const target = this.net.edges[sideRight ? e.or[i] : e.ol[i]];
-      if (target.kind === 'main' && car.lcTimer <= 0) {
+      if (target.kind === 'main' && car.lcTimer <= 0 && !car.waitForPlayer) {
         car.lcTimer = 0.4;
         const fr = e.frame(car.s, car.d, this.f);
         target.project(fr.x, fr.z, target.length / 2, this.p, target.n);
@@ -464,9 +570,12 @@ export class Traffic {
     }
     if (e.kind !== 'main' || !e.line) {
       // ramps: keep to lane centre
-      if (Math.abs(car.dTarget - laneCenter(curLane)) > 0.05 && Math.abs(car.d - car.dTarget) < 0.1) car.dTarget = laneCenter(curLane);
+      const c = this.laneTarget(e, car.s, curLane, car.width / 2);
+      if (Math.abs(car.dTarget - c) > 0.05 && Math.abs(car.d - car.dTarget) < 0.1) car.dTarget = c;
       return;
     }
+    // the road narrowed under the car (a lane ends): move into a lane that still exists right away
+    if (car.prepD === null && Math.abs(car.d - car.dTarget) < 0.3 && Math.abs(car.dTarget - laneCenter(curLane)) > 0.5) car.dTarget = laneCenter(curLane);
     // mandatory: planned exit
     if (car.exit) {
       const ls = this.net.lineS(e, car.s)!;
@@ -474,11 +583,15 @@ export class Traffic {
       const dist = (((car.exit.s - ls) % L) + L) % L;
       const right = car.exit.side === 'right';
       const wantLane = right ? Math.ceil(lanes) - 1 : 0;
-      if (dist > L - 120) {
-        // just passed the diverge point: steer into the ramp lane if it is open
+      if (dist > L - 160) {
+        // just passed the diverge point: steer into the deceleration lane while it is open
         const openId = right ? e.or[i] : e.ol[i];
-        if (openId >= 0 && curLane === wantLane) car.dTarget = right ? e.brAt(car.s) + 2.0 : e.blAt(car.s) - 2.0;
-        else if (dist < L - 260) car.exit = null;
+        if (openId === car.exit.edge && curLane === wantLane) car.dTarget = right ? e.brAt(car.s) + 2.0 : e.blAt(car.s) - 2.0;
+        return;
+      }
+      if (dist > L / 2) {
+        // missed it: think about the next one
+        this.planExit(car);
         return;
       }
       if (dist < 650 && car.lcTimer <= 0 && curLane !== wantLane && car.prepD === null) {
@@ -601,13 +714,20 @@ export class Traffic {
     car.d = this.p.d;
     const lanes = Math.max(1, Math.round(n.lanesAt(car.s)));
     const k = clamp(n.laneIndex(car.s, car.d), 0, lanes - 1);
-    car.dTarget = n.laneCenter(car.s, k);
+    car.dTarget = this.laneTarget(n, car.s, k, car.width / 2);
     car.prepD = null;
     if (n.kind === 'main') this.planExit(car);
     else car.exit = null;
   }
 
-  private spawn(dt: number, player: PlayerProxy | null, focus: THREE.Vector3) {
+  /** Lane centre kept within the drivable band (tapering lanes are narrower than a full lane). */
+  private laneTarget(e: Edge, s: number, k: number, half: number) {
+    const lo = e.blAt(s) + half + 0.1;
+    const hi = e.brAt(s) - half - 0.1;
+    return lo <= hi ? clamp(e.laneCenter(s, k), lo, hi) : (lo + hi) / 2;
+  }
+
+  private spawn(dt: number, player: PlayerProxy | null, focus: THREE.Vector3, others: PlayerProxy[]) {
     this.spawnTimer -= dt;
     if (this.spawnTimer > 0 || !player) return;
     this.spawnTimer = 0.5;
@@ -637,32 +757,144 @@ export class Traffic {
           const lane = Math.floor(this.rnd() * lanes);
           const dLane = loc.edge.laneCenter(loc.s, lane);
           // keep a gap to existing cars
-          const list = this.cars.filter((c) => c.edge === loc.edge && Math.abs(c.s - loc.s) < 25 && Math.abs(c.d - dLane) < 2.5);
-          if (list.length) continue;
+          const taken = (c: Car | PlayerProxy) => c.edge === loc.edge && Math.abs(c.s - loc.s) < 25 && Math.abs(c.d - dLane) < 2.5;
+          if (this.cars.some(taken) || others.some(taken)) continue;
           const lim = loc.edge.speedAt(loc.s) / 3.6;
           const v = this.density === 'rush' ? lim * (0.2 + this.rnd() * 0.4) : lim * (0.85 + this.rnd() * 0.2);
           this.cars.push(this.makeCar(loc.edge, loc.s, lane, v));
         }
       }
     }
-    // entrance ramps near the player
-    if (this.rnd() < (this.density === 'sparse' ? 0.15 : 0.35)) {
-      const near = this.net.entrances.filter((en) => {
-        const e = this.net.edges[en.edge];
-        const dx = e.x[0] - focus.x;
-        const dz = e.z[0] - focus.z;
-        const d2 = dx * dx + dz * dz;
+    this.feedEntranceAhead(player, focus);
+    if (this.rnd() < RAMP_SPAWN[this.density]) {
+      // background flow on the other entrances around
+      const near = this.entranceChains.filter((ch) => {
+        const first = ch.chain[0];
+        const d2 = (first.x[0] - focus.x) ** 2 + (first.z[0] - focus.z) ** 2;
         return d2 > 350 * 350 && d2 < 1200 * 1200;
       });
       if (near.length) {
-        const en = near[Math.floor(this.rnd() * near.length)];
-        // start at the beginning of the ramp chain
-        let e = this.net.edges[en.edge];
-        for (let k = 0; k < 4 && e.pred.length === 1; k++) e = e.pred[0];
-        const busy = this.cars.some((c) => c.edge === e && c.s < 30);
-        if (!busy) this.cars.push(this.makeCar(e, 2, 0, 9));
+        const ch = near[Math.floor(this.rnd() * near.length)];
+        this.spawnOnChain(ch, ch.length - 4, focus);
       }
     }
+  }
+
+  /**
+   * Keeps the next entrance ahead of the player supplied with cars placed so
+   * that they reach the acceleration lane at about the time the player passes:
+   * merging traffic is then actually seen instead of happening out of sight.
+   */
+  private feedEntranceAhead(player: PlayerProxy, focus: THREE.Vector3) {
+    if (player.edge.kind !== 'main' || !player.edge.line) return;
+    const line = player.edge.line;
+    const pls = this.net.lineS(player.edge, player.s)!;
+    const L = this.net.lines[line].length;
+    const pv = Math.max(player.v, 8);
+    let best: EntranceChain | null = null;
+    let bestAhead = Infinity;
+    for (const ch of this.entranceChains) {
+      if (ch.line !== line) continue;
+      const ahead = (((ch.s - pls) % L) + L) % L;
+      if (ahead > 250 && ahead < 1500 && ahead < bestAhead) {
+        bestAhead = ahead;
+        best = ch;
+      }
+    }
+    // a timed car must be able to wait for the player before the end of the acceleration lane
+    if (!best || best.hold < 60 || this.rnd() > 0.4) return;
+    const chain = best;
+    if (this.cars.filter((c) => c.meet === chain).length >= RAMP_FEED[this.density]) return;
+    // where on the ramp a car averaging ~8.5 m/s reaches the acceleration lane together with the player;
+    // otherwise start further up (out of sight) and let the car pace itself — always short of the stop line
+    const zone = this.mergeZoneLength(chain);
+    const ideal = zone + (Math.max(0, bestAhead - zone) * 8.5) / pv;
+    const top = chain.length - 4;
+    const lowest = chain.length - chain.hold + 25;
+    if (lowest > top) return;
+    for (const back of [clamp(ideal, lowest, top), top, (clamp(ideal, lowest, top) + top) / 2]) {
+      const car = this.spawnOnChain(chain, back, focus, player.heading);
+      if (car) {
+        car.meet = chain;
+        break;
+      }
+    }
+  }
+
+  /** Places a car `back` metres before the end of an entrance ramp chain (if that spot is free and out of sight). */
+  private spawnOnChain(ch: EntranceChain, back: number, focus: THREE.Vector3, heading?: number): Car | null {
+    let rest = ch.length - back;
+    let k = 0;
+    while (k < ch.chain.length - 1 && rest > ch.chain[k].length) rest -= ch.chain[k++].length;
+    const e = ch.chain[k];
+    const s = clamp(rest, 2, e.length - 2);
+    // never pop up in plain view: far away, or behind the player, or well below / above the deck the player is on
+    const fr = e.frame(s, 0, this.f);
+    const dx = fr.x - focus.x;
+    const dz = fr.z - focus.z;
+    const dist = Math.hypot(dx, dz);
+    const behind = heading !== undefined && dx * Math.cos(heading) + dz * Math.sin(heading) < -20;
+    const otherLevel = Math.abs(e.yAt(s) - focus.y) > 5;
+    if (dist < 240 && !(dist > 90 && (behind || otherLevel))) return null;
+    if (this.cars.some((c) => c.edge === e && Math.abs(c.s - s) < 30)) return null;
+    if (this.cars.filter((c) => ch.chain.includes(c.edge)).length >= 5) return null;
+    const lanes = Math.max(1, Math.round(e.lanesAt(s)));
+    const lane = Math.floor(this.rnd() * lanes);
+    const car = this.makeCar(e, s, lane, (e.speedAt(s) / 3.6) * (0.75 + this.rnd() * 0.15));
+    this.cars.push(car);
+    return car;
+  }
+
+  /**
+   * Desired speed of a ramp car that should join the line just ahead of the
+   * player: it aims to reach the start of the acceleration lane together with
+   * the player (never crawling below a believable minimum).
+   */
+  private meetSpeed(car: Car, player: PlayerProxy | null, v0: number): number {
+    const ch = car.meet!;
+    const k = ch.chain.indexOf(car.edge);
+    car.waitForPlayer = false;
+    if (k < 0 || !player || player.edge.kind !== 'main' || player.edge.line !== ch.line) {
+      car.meet = null;
+      return v0;
+    }
+    let rem = car.edge.length - car.s;
+    for (let j = k + 1; j < ch.chain.length; j++) rem += ch.chain[j].length;
+    const L = this.net.lines[ch.line].length;
+    const ahead = (((ch.s - this.net.lineS(player.edge, player.s)!) % L) + L) % L;
+    if (ahead > L / 2) {
+      // the player has gone by
+      car.meet = null;
+      return v0;
+    }
+    // the ramp runs alongside the line in the acceleration lane, so distances to the merge point compare directly
+    const lead = ahead - rem;
+    const zone = this.mergeZoneLength(ch);
+    // early: wait (at the hold point, see update) until the player is close behind, then go
+    const pos = ch.length - rem;
+    car.waitForPlayer = lead > 160 && pos < ch.hold - 2;
+    if (rem <= zone) return car.waitForPlayer ? Math.min(v0, Math.max(3, player.v * 0.5)) : v0;
+    // reach the start of the acceleration lane when the player is still ~25 m short of it
+    const dCar = rem - zone;
+    const dPlayer = ahead - zone - 25;
+    if (dPlayer <= 0) return v0;
+    return clamp(dCar / (dPlayer / Math.max(player.v, 4)), 3, v0);
+  }
+
+  private mergeZoneLength(ch: EntranceChain) {
+    const last = ch.chain[ch.chain.length - 1];
+    const mz = this.mergeZone.get(last.id);
+    return mz ? last.length - mz.start * last.ds : 0;
+  }
+
+  /** Removes traffic between two arc lengths of a line (e.g. to clear a starting grid). */
+  clearLine(line: LineId, s0: number, s1: number) {
+    const L = this.net.lines[line].length;
+    this.cars = this.cars.filter((c) => {
+      if (c.edge.kind !== 'main' || c.edge.line !== line) return true;
+      const rel = (((this.net.lineS(c.edge, c.s)! - s0) % L) + L) % L;
+      return rel > s1 - s0;
+    });
   }
 
   private otherLineSFromPoint(line: LineId, p: THREE.Vector3) {
@@ -686,6 +918,7 @@ export class Traffic {
 
   /** Push instance transforms and light states to the GPU. */
   render(night: number) {
+    if (!this.meshes.length) return;
     const counts = new Array(this.meshes.length).fill(0);
     const m = new THREE.Matrix4();
     const q = new THREE.Quaternion();

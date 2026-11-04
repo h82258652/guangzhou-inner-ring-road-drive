@@ -10,17 +10,20 @@ import { CameraRig, CAMERA_NAMES } from './core/CameraRig';
 import { loadSettings, QUALITY, saveSettings, TIME_HOURS, type GameOptions, type Settings } from './core/Settings';
 import { type Edge, RoadNetwork, newFrame } from './road/Network';
 import { buildRoads, type RoadVisuals } from './road/RoadBuilder';
+import { DeckIndex } from './road/Clearance';
 import { Environment } from './world/Environment';
 import { envUniforms, roadMaterials, setAnisotropy } from './world/Materials';
 import { buildCity, ensureTrees, type CityVisuals } from './world/City';
 import { buildLandmarks, type LandmarkVisuals } from './world/Landmarks';
 import { Signs } from './world/Signs';
 import { Player } from './vehicle/Player';
-import { SEDAN, SUV } from './vehicle/Dynamics';
-import { obbOverlap } from './vehicle/Collision';
+import { type Controls, raceTune, SEDAN, SUV } from './vehicle/Dynamics';
+import { resolveContacts } from './vehicle/Contacts';
 import { TAXI_COLOR } from './vehicle/CarModel';
+import { fmtRaceTime, Race } from './race/Race';
+import { chequeredLine, nameTag } from './race/RaceVisuals';
 import { Traffic, type PlayerProxy } from './traffic/Traffic';
-import { Hud } from './ui/Hud';
+import { Hud, type RaceHudState } from './ui/Hud';
 import { Minimap } from './ui/Minimap';
 import { Menu } from './ui/Menu';
 import { Session } from './game/Session';
@@ -44,6 +47,7 @@ export class App {
   settings: Settings = loadSettings();
   env!: Environment;
   net!: RoadNetwork;
+  decks!: DeckIndex;
   cityData: CityFile | null = null;
   roads!: RoadVisuals;
   city: CityVisuals | null = null;
@@ -70,6 +74,11 @@ export class App {
   private f = newFrame();
   private lastOptions: GameOptions | null = null;
   private carHitCooldown = 0;
+  race: Race | null = null;
+  private raceObjects: THREE.Object3D[] = [];
+  private raceEnding = false;
+  /** controls while waiting on the grid */
+  private readonly gridHold: Controls = { throttle: 0, brake: 0, steer: 0, handbrake: true };
 
   constructor(readonly root: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: QUALITY[this.settings.quality].antialias, powerPreference: 'high-performance' });
@@ -128,18 +137,19 @@ export class App {
       }),
     ]);
     this.net = new RoadNetwork(netData);
+    this.decks = new DeckIndex(this.net);
     this.cityData = cityData;
     this.status('生成高架、匝道与标线…', 0.45);
     await frame();
     this.env = new Environment(this.scene, this.renderer);
     roadMaterials();
-    this.roads = buildRoads(this.net);
+    this.roads = buildRoads(this.net, this.decks);
     this.scene.add(this.roads.group);
     if (cityData) {
       this.status('生成城市建筑与珠江…', 0.62);
       await frame();
       const q = QUALITY[this.settings.quality];
-      this.city = buildCity(cityData, { trees: q.trees, infill: q.infill });
+      this.city = buildCity(cityData, { trees: q.trees, infill: q.infill, decks: this.decks });
       this.scene.add(this.city.group);
       this.status('生成地标…', 0.82);
       await frame();
@@ -153,7 +163,7 @@ export class App {
     }
     this.status('布置交通标志与车流…', 0.9);
     await frame();
-    this.signs = new Signs(this.net);
+    this.signs = new Signs(this.net, this.decks);
     this.scene.add(this.signs.group);
     this.traffic = new Traffic(this.net);
     this.scene.add(this.traffic.group);
@@ -194,7 +204,7 @@ export class App {
     this.env.drawDistance = q.drawDistance;
     this.camera.far = q.drawDistance * 6;
     this.camera.updateProjectionMatrix();
-    if (this.city && this.cityData && q.trees) ensureTrees(this.city, this.cityData);
+    if (this.city && this.cityData && q.trees) ensureTrees(this.city, this.cityData, this.decks);
     if (this.city) for (const t of this.city.treeChunks) t.visible = q.trees;
     if (q.bloom && !this.composer) {
       this.composer = new EffectComposer(this.renderer);
@@ -222,6 +232,7 @@ export class App {
       this.scene.remove(this.player.group);
       this.player = null;
     }
+    this.clearRace();
     this.session = null;
     this.rig.mode = 'cinematic';
     this.rig.reset();
@@ -246,6 +257,8 @@ export class App {
   }
 
   begin(o: GameOptions) {
+    // started from the menu, the pause menu or a result screen ("再来一次")
+    this.menu.hide();
     this.lastOptions = o;
     this.settings.options = { ...o };
     saveSettings(this.settings);
@@ -253,17 +266,22 @@ export class App {
     this.audio.suspend(false);
     this.env.set(TIME_HOURS[o.time], o.weather);
     if (this.player) this.scene.remove(this.player.group);
+    this.clearRace();
+    const racing = o.mode === 'race';
     const start = this.resolveStart(o);
     const paint = o.car === 'taxi' ? TAXI_COLOR : o.car === 'suv' ? 0x2a2d31 : 0xc8ccd2;
-    this.player = new Player(this.net, o.car === 'suv' ? SUV : SEDAN, o.car, paint, start.edge, start.s);
+    const spec = o.car === 'suv' ? SUV : SEDAN;
+    const grip = o.weather === 'rain' ? 0.72 : 1;
+    this.player = new Player(this.net, racing ? raceTune(spec) : spec, o.car, paint, start.edge, start.s);
     this.player.placeAt(start.edge, start.s, start.d, start.v);
-    this.player.dyn.gripScale = o.weather === 'rain' ? 0.72 : 1;
+    this.player.dyn.gripScale = grip;
     this.player.lightsOn = this.env.night > 0.4 || o.weather === 'rain';
     this.scene.add(this.player.group);
-    this.session = new Session(this.net, o);
+    this.session = new Session(this.net, o, this.signs.cameras);
     this.traffic.density = o.traffic;
     const ls = this.net.lineS(start.edge, start.s);
     this.traffic.populate(o.line, ls ?? 0);
+    if (racing) this.setupRace(o, ls ?? 0, grip);
     this.signs.vmsText = (line) => this.vmsMessage(line, o);
     this.signs.refreshVms();
     this.rig.mode = 'chase';
@@ -271,7 +289,62 @@ export class App {
     this.hud.show(true);
     this.touch.show(this.input.usingTouch);
     this.state = 'driving';
-    this.hud.toast(`内环路 ${o.line}线 · ${o.line === 'A' ? '逆时针' : '顺时针'} · 限速 60`, 'info', 3000);
+    if (racing) this.hud.toast(`竞速模式 · ${(this.race!.distance / 1000).toFixed(1)} km · 无视交通法规`, 'warn', 3000);
+    else this.hud.toast(`内环路 ${o.line}线 · ${o.line === 'A' ? '逆时针' : '顺时针'} · 限速 60`, 'info', 3000);
+  }
+
+  /** Starting grid with the AI rivals, start / finish lines, a clear road ahead of the grid. */
+  private setupRace(o: GameOptions, startS: number, grip: number) {
+    const lights = this.player!.lightsOn;
+    this.race = new Race(this.net, { line: o.line, startS, length: o.raceLength, rivals: o.raceRivals, level: o.raceLevel, gripScale: grip }, this.player!, (kind, color, edge, s, name) => {
+      const spec = raceTune(kind === 'suv' || kind === 'mpv' ? SUV : SEDAN);
+      const car = new Player(this.net, spec, kind, color, edge, s, { headlight: false, interior: false });
+      car.dyn.gripScale = grip;
+      car.lightsOn = lights;
+      car.group.add(nameTag(name, color));
+      this.scene.add(car.group);
+      this.raceObjects.push(car.group);
+      return car;
+    });
+    this.traffic.clearLine(o.line, startS - 160, startS + 260);
+    const marks = [chequeredLine(this.net, o.line, startS)];
+    if (Math.abs(this.race.distance - this.race.L) > 1) marks.push(chequeredLine(this.net, o.line, this.race.finishS));
+    for (const m of marks) {
+      this.scene.add(m);
+      this.raceObjects.push(m);
+    }
+  }
+
+  private clearRace() {
+    for (const o of this.raceObjects) {
+      this.scene.remove(o);
+      o.traverse((c) => {
+        if (c instanceof THREE.Mesh) c.geometry.dispose();
+        const mat = (c as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+        for (const m of Array.isArray(mat) ? mat : mat ? [mat] : []) {
+          (m as THREE.MeshBasicMaterial).map?.dispose();
+          m.dispose();
+        }
+      });
+    }
+    this.raceObjects = [];
+    this.race = null;
+    this.raceEnding = false;
+  }
+
+  /** Results of a race (the player finished, or left the ring). */
+  private endRace(dnf: string | null) {
+    const race = this.race;
+    if (!race || !this.session || this.state === 'ended') return;
+    this.state = 'ended';
+    this.audio.suspend(true);
+    const rank = race.rankOf(race.player);
+    const title = dnf ?? `${rank === 1 ? '冠军！' : `第 ${rank} 名`} · ${fmtRaceTime(race.player.finish ?? race.clock)}`;
+    const rows: [string, string][] = [...race.results(), ['最高速度', `${this.session.maxSpeed.toFixed(0)} km/h`], ['碰撞护栏 / 车辆', `${this.session.barrierHits} / ${this.session.carHits}`]];
+    this.menu.showResult(title, rows, {
+      again: () => this.lastOptions && this.begin(this.lastOptions),
+      menu: () => this.toMenu(),
+    });
   }
 
   private vmsMessage(line: LineId | null, o: GameOptions): string[] {
@@ -485,12 +558,17 @@ export class App {
     if (input.consume('reset')) this.resetToLane();
 
     if (this.autopilot) this.autopilotControls();
+    const race = this.race;
+    // on the grid the cars are held until the start
+    const controls = race && race.state === 'countdown' ? this.gridHold : input.controls;
+    race?.plan(dt, this.traffic.cars);
     // physics
     this.acc += dt;
     let steps = 0;
     let impact = 0;
     while (this.acc >= FIXED_DT && steps < 12) {
-      const info = player.step(FIXED_DT, input.controls);
+      const info = player.step(FIXED_DT, controls);
+      race?.stepCars(FIXED_DT);
       impact = Math.max(impact, info.impact);
       this.acc -= FIXED_DT;
       steps++;
@@ -498,24 +576,15 @@ export class App {
     const t = player.tracker;
     // traffic + vehicle collisions
     const heading = player.dyn.psi;
-    const proxy: PlayerProxy = {
-      edge: t.edge,
-      s: t.s,
-      d: t.d,
-      v: Math.max(0, player.dyn.vx),
-      len: player.halfLength * 2,
-      width: player.halfWidth * 2,
-      x: player.dyn.x,
-      z: player.dyn.z,
-      heading,
-    };
-    this.traffic.update(dt, proxy, player.group.position);
-    const carImpact = this.carCollisions();
+    const rivals = race ? race.rivals.map((r) => r.car) : [];
+    this.traffic.update(dt, proxyOf(player), player.group.position, rivals.map(proxyOf));
+    let carImpact = 0;
+    for (const c of resolveContacts([player, ...rivals], this.traffic.cars)) if (c.a === player || c.b === player) carImpact = Math.max(carImpact, c.impact);
     this.carHitCooldown -= dt;
-    if (carImpact > 0 && this.carHitCooldown <= 0) {
+    if (carImpact > 1.2 && this.carHitCooldown <= 0) {
       this.carHitCooldown = 2;
       session.carHits++;
-      this.hud.toast('与其他车辆发生碰撞', 'bad');
+      if (session.rules) this.hud.toast('与其他车辆发生碰撞', 'bad');
     }
     if (impact > 1.5 || carImpact > 1.5) {
       this.audio.crash(Math.max(impact, carImpact));
@@ -538,6 +607,7 @@ export class App {
     player.updateInterior();
     player.syncVisual(dt);
     player.group.updateMatrixWorld(true);
+    for (const r of rivals) r.syncVisual(dt);
     this.rig.update(dt, player.group, player.body, player.dyn.vx, input.lookBack);
     this.traffic.render(this.env.night);
 
@@ -558,34 +628,38 @@ export class App {
         this.audio.shutter();
       } else if (ev.type === 'chime') this.audio.chime();
       else if (ev.type === 'end') {
-        setTimeout(() => this.endSession(ev.end!.title, ev.end!.reason), 900);
+        // in a race, reaching the end of an exit ramp means leaving the race
+        if (race) setTimeout(() => this.race === race && this.endRace('已驶离赛道 · 未完赛'), 900);
+        else setTimeout(() => this.session === session && this.endSession(ev.end!.title, ev.end!.reason), 900);
       }
     }
+    if (race) this.raceEvents(dt, race);
     // HUD
-    const limit = t.edge.speedAt(t.s);
-    const nx = session.nextExit(t.edge, t.s);
+    const nx = race ? null : session.nextExit(t.edge, t.s);
     this.hud.update(
       {
         speedKmh: player.speedKmh,
         rpm: player.dyn.rpm,
         gear: player.dyn.gear,
-        limit,
+        limit: race ? null : t.edge.speedAt(t.s),
         line: t.edge.kind === 'main' ? t.edge.line : null,
         onRamp: t.edge.kind === 'ramp',
         section: this.net.nameAt(t.edge, t.s),
         nextExit: nx ? { code: nx.x.code, name: nx.x.names[0], dist: nx.dist, side: nx.x.side } : null,
-        guidance: session.guidance(t.edge, t.s, t.d),
+        guidance: race ? null : session.guidance(t.edge, t.s, t.d),
         stats: session.stats(),
         signal: session.signal,
         hazard: player.hazard,
         fps: this.fpsAvg,
         lightsOn: player.lightsOn,
         camName: CAMERA_NAMES[this.rig.mode],
+        race: race ? this.raceHud(race) : null,
       },
       dt,
     );
     const dest = session.destination ? this.net.edges[session.destination.edge] : null;
-    this.minimap.draw(player.dyn.x, player.dyn.z, heading, t.edge.line ?? session.line, dest ? { x: dest.x[0], z: dest.z[0] } : null);
+    const others = race ? race.rivals.map((r) => ({ x: r.car.dyn.x, z: r.car.dyn.z, color: r.color })) : [];
+    this.minimap.draw(player.dyn.x, player.dyn.z, heading, t.edge.line ?? session.line, dest ? { x: dest.x[0], z: dest.z[0] } : null, others);
     this.audio.update(dt, {
       rpm: player.dyn.rpm,
       throttle: player.dyn.throttleOut,
@@ -598,37 +672,40 @@ export class App {
     });
   }
 
-  private carCollisions(): number {
-    const player = this.player!;
-    const dyn = player.dyn;
-    const pBox = { x: dyn.x, z: dyn.z, heading: dyn.psi, halfLength: player.halfLength - 0.1, halfWidth: player.halfWidth - 0.05 };
-    let worst = 0;
-    for (const car of this.traffic.cars) {
-      const dx = car.x - dyn.x;
-      const dz = car.z - dyn.z;
-      if (dx * dx + dz * dz > 200) continue;
-      if (Math.abs(car.y - player.y) > 3) continue;
-      const ov = obbOverlap(pBox, { x: car.x, z: car.z, heading: car.heading, halfLength: car.len / 2 - 0.1, halfWidth: car.width / 2 - 0.05 });
-      if (!ov) continue;
-      // separate (player takes most of the correction)
-      dyn.x += ov.nx * ov.depth;
-      dyn.z += ov.nz * ov.depth;
-      const [vx, vz] = dyn.worldVelocity();
-      const cvx = Math.cos(car.heading) * car.v;
-      const cvz = Math.sin(car.heading) * car.v;
-      const rel = (vx - cvx) * ov.nx + (vz - cvz) * ov.nz;
-      if (rel < 0) {
-        const mP = player.dyn.spec.mass;
-        const mC = 1500;
-        const j = (-(1 + 0.25) * rel) / (1 / mP + 1 / mC);
-        dyn.setWorldVelocity(vx + (j / mP) * ov.nx, vz + (j / mP) * ov.nz);
-        const along = Math.cos(car.heading) * ov.nx + Math.sin(car.heading) * ov.nz;
-        car.v = Math.max(0, car.v - (j / mC) * along);
-        car.bumped = 2.5;
-        if (car.bumped > 0 && Math.abs(rel) > 1.2 && worst === 0) worst = Math.abs(rel);
+  /** Race clock, standings and messages; the result screen once the player has crossed the line. */
+  private raceEvents(dt: number, race: Race) {
+    for (const ev of race.update(dt)) {
+      if (ev.type === 'go') {
+        this.audio.chime();
+        this.hud.toast('出发！', 'info', 1200);
+      } else if (ev.type === 'overtake' && ev.name) this.hud.toast(`超越 ${ev.name} · 第 ${ev.rank} 名`, 'info', 1500);
+      else if (ev.type === 'overtaken' && ev.name) this.hud.toast(`被 ${ev.name} 超越 · 第 ${ev.rank} 名`, 'warn', 1500);
+      else if (ev.type === 'finish') {
+        this.audio.chime();
+        this.hud.toast(`冲线！第 ${ev.rank} 名`, 'info', 2500);
       }
     }
-    return worst;
+    if (race.state === 'done' && !this.raceEnding) {
+      this.raceEnding = true;
+      setTimeout(() => this.race === race && this.endRace(null), 2500);
+    }
+  }
+
+  private raceHud(race: Race): RaceHudState {
+    const me = race.player;
+    const t = me.car.tracker;
+    let warning: string | null = null;
+    if (t.edge.kind !== 'main' || t.edge.line !== race.setup.line) warning = '已驶离赛道 · 按 R 返回';
+    else if (race.state === 'racing' && me.car.dyn.vx > 3 && Math.cos(me.car.dyn.psi - t.roadHeading()) < -0.3) warning = '逆行！';
+    return {
+      rank: race.rankOf(me),
+      total: race.entrants.length,
+      clock: me.finish ?? race.clock,
+      remaining: race.remaining,
+      distance: race.distance,
+      board: race.standings().map((en) => ({ name: en.name, gap: en.progress - me.progress, me: en === me, color: en.color, finished: en.finish !== null })),
+      warning,
+    };
   }
 
   /** Debug/demo autopilot (window.__game.autopilot = true): pure pursuit along the current lane. */
@@ -674,6 +751,13 @@ export class App {
     const p = this.player!;
     const t = p.tracker;
     const e = t.edge;
+    const race = this.race;
+    if (race && (e.kind !== 'main' || e.line !== race.setup.line || Math.cos(p.dyn.psi - t.roadHeading()) < 0)) {
+      // back onto the race line where the player had got to, facing the right way
+      race.respawn(race.player);
+      this.rig.reset();
+      return;
+    }
     const lanes = Math.max(1, Math.round(e.lanesAt(t.s)));
     const k = clamp(e.laneIndex(t.s, t.d), 0, lanes - 1);
     p.placeAt(e, t.s, e.laneCenter(t.s, k), 0);
@@ -702,5 +786,11 @@ export class App {
 
 function frame() {
   return new Promise((r) => requestAnimationFrame(() => r(null)));
+}
+
+/** How the traffic sees a car driven by the full dynamics. */
+function proxyOf(p: Player): PlayerProxy {
+  const t = p.tracker;
+  return { edge: t.edge, s: t.s, d: t.d, v: Math.max(0, p.dyn.vx), len: p.halfLength * 2, width: p.halfWidth * 2, x: p.dyn.x, z: p.dyn.z, heading: p.dyn.psi };
 }
 

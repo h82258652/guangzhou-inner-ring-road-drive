@@ -9,6 +9,7 @@ import { ChunkedBuilder, MeshBuilder } from './MeshBuilder';
 import { buildingMaterial, CELL_H, CELL_W, ROOF_STYLE } from './Facades';
 import { envUniforms, roadMaterials } from './Materials';
 import { hash01, mulberry32 } from '../shared/math';
+import { BARRIER_WIDTH, type DeckIndex, GIRDER_DEPTH } from '../road/Clearance';
 
 export class Terrain {
   constructor(
@@ -44,7 +45,7 @@ export interface CityVisuals {
 
 const dq = (v: number) => v / 10;
 
-export function buildCity(city: CityFile, opts: { trees: boolean; infill: boolean }): CityVisuals {
+export function buildCity(city: CityFile, opts: { trees: boolean; infill: boolean; decks?: DeckIndex }): CityVisuals {
   const group = new THREE.Group();
   group.name = 'city';
   const terrain = city.terrain ? decodeTerrain(city.terrain) : null;
@@ -149,7 +150,7 @@ export function buildCity(city: CityFile, opts: { trees: boolean; infill: boolea
     for (let k = 0; k < flat.length; k += 3) pts.push([dq(flat[k]), dq(flat[k + 1]), dq(flat[k + 2])]);
     if (pts.length < 2) continue;
     const elevated = kind >= 10;
-    ribbon(sb, pts, width, elevated ? 0.02 : 0.045 + (kind % 3) * 0.004, elevated ? 'x' : 's', kind >= 10 ? true : false, piers);
+    ribbon(sb, pts, width, elevated ? 0.02 : 0.045 + (kind % 3) * 0.004, elevated ? 'x' : 's', kind >= 10 ? true : false, piers, opts.decks);
   }
   const sgroup = sb.toGroup({ s: streetMat, x: streetMat, xs: rmats.girder, xb: rmats.concrete }, 'aExtra', { shadows: { xs: true, xb: true } });
   sgroup.name = 'streets';
@@ -175,16 +176,16 @@ export function buildCity(city: CityFile, opts: { trees: boolean; infill: boolea
   group.add(buildRail(city));
 
   /* ---- trees ---- */
-  const treeChunks = opts.trees ? buildTrees(city, terrain) : [];
+  const treeChunks = opts.trees ? buildTrees(city, terrain, opts.decks) : [];
   for (const t of treeChunks) group.add(t);
 
   return { group, chunks: [...chunks, ...sgroup.children], treeChunks, terrain };
 }
 
 /** Builds the street trees later, e.g. when switching from the low preset at runtime. */
-export function ensureTrees(vis: CityVisuals, city: CityFile) {
+export function ensureTrees(vis: CityVisuals, city: CityFile, decks?: DeckIndex) {
   if (vis.treeChunks.length) return;
-  vis.treeChunks = buildTrees(city, vis.terrain);
+  vis.treeChunks = buildTrees(city, vis.terrain, decks);
   for (const t of vis.treeChunks) vis.group.add(t);
 }
 
@@ -243,10 +244,39 @@ function patchStreetNight(m: THREE.MeshStandardMaterial) {
   m.customProgramCacheKey = () => 'street';
 }
 
-/** Flat ribbon for streets; elevated ones get a deck, low barriers and piers. */
-function ribbon(cb: ChunkedBuilder, pts: [number, number, number][], width: number, lift: number, mat: string, elevated: boolean, piers: THREE.Matrix4[]) {
-  const n = pts.length;
+/**
+ * Splits a ribbon's centreline near the drivable decks and flags the pieces
+ * lying on a drivable deck at about the same level (a street meeting the ring
+ * at grade, an expressway joining at a terminal): those are not drawn, so the
+ * two surfaces neither z-fight nor hide the lane markings.
+ */
+function hiddenOnDecks(pts: [number, number, number][], half: number, tol: number, decks: DeckIndex) {
+  const out: [number, number, number][] = [pts[0]];
+  const hidden: boolean[] = [];
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1];
+    const b = pts[i];
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    const ym = (a[2] + b[2]) / 2;
+    const near = decks.at((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, len / 2 + half, 0).some((h) => Math.abs(h.y - ym) < tol + 4);
+    const k = near ? Math.max(1, Math.ceil(len / 6)) : 1;
+    for (let j = 1; j <= k; j++) {
+      const at = (t: number): [number, number, number] => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+      const m = at((j - 0.5) / k);
+      hidden.push(near && decks.at(m[0], m[1], 0, 0.3).some((h) => Math.abs(h.y - m[2]) < tol));
+      out.push(at(j / k));
+    }
+  }
+  return { pts: out, hidden };
+}
+
+/** Flat ribbon for streets; elevated ones get a deck, low barriers and piers (kept off the drivable decks). */
+function ribbon(cb: ChunkedBuilder, pts0: [number, number, number][], width: number, lift: number, mat: string, elevated: boolean, piers: THREE.Matrix4[], decks?: DeckIndex) {
   const half = width / 2;
+  const split = decks ? hiddenOnDecks(pts0, half, elevated ? 3 : 1.5, decks) : null;
+  const pts = split ? split.pts : pts0;
+  const hidden = split ? split.hidden : [];
+  const n = pts.length;
   const normals: [number, number][] = [];
   for (let i = 0; i < n; i++) {
     const a = pts[Math.max(0, i - 1)];
@@ -267,7 +297,7 @@ function ribbon(cb: ChunkedBuilder, pts: [number, number, number][], width: numb
     const yy = y + lift;
     const L = b.vertex(x - nx * half, yy, z - nz * half, 0, 1, 0, -half, s, undefined, 999);
     const R = b.vertex(x + nx * half, yy, z + nz * half, 0, 1, 0, half, s, undefined, 999);
-    if (prev) b.quad(prev[0], prev[1], R, L);
+    if (prev && !hidden[i - 1]) b.quad(prev[0], prev[1], R, L);
     prev = [L, R];
   }
   if (!elevated) return;
@@ -280,7 +310,7 @@ function ribbon(cb: ChunkedBuilder, pts: [number, number, number][], width: numb
     const [x0, z0, y0] = pts[i - 1];
     const [x1, z1, y1] = pts[i];
     const seg = Math.hypot(x1 - x0, z1 - z0);
-    if (y0 < 2 && y1 < 2) {
+    if ((y0 < 2 && y1 < 2) || hidden[i - 1]) {
       s += seg;
       continue;
     }
@@ -320,7 +350,7 @@ function ribbon(cb: ChunkedBuilder, pts: [number, number, number][], width: numb
       const px = x0 + (x1 - x0) * f;
       const pz = z0 + (z1 - z0) * f;
       const py = y0 + (y1 - y0) * f;
-      if (py > 4) piers.push(new THREE.Matrix4().compose(new THREE.Vector3(px, 0, pz), new THREE.Quaternion(), new THREE.Vector3(1, py - 1.6, 1)));
+      if (py > 4 && (!decks || decks.clear(px, pz, 0.8, 0, py - 1.6))) piers.push(new THREE.Matrix4().compose(new THREE.Vector3(px, 0, pz), new THREE.Quaternion(), new THREE.Vector3(1, py - 1.6, 1)));
       lastPier = s + t;
     }
     s += seg;
@@ -437,16 +467,85 @@ function buildRail(city: CityFile): THREE.Object3D {
   return mesh;
 }
 
-function buildTrees(city: CityFile, terrain: Terrain | null): THREE.Object3D[] {
-  const chunkSize = 500;
-  const groups = new Map<string, number[]>();
+/** Tree crown size per unit scale: radius and top height (the instance may stretch up to 1.25 × in height). */
+const CROWN_R = 3.25;
+const CROWN_TOP = 6.8 * 1.25;
+
+/**
+ * Tree positions and scales [x, z, s, …]: trees standing in a street
+ * carriageway are dropped, and crowns that would reach into a drivable
+ * deck (or overhang a roadway at ground level) are shrunk to fit or dropped.
+ */
+export function placeTrees(city: CityFile, terrain: Terrain | null, decks?: DeckIndex): number[] {
+  const cell = 24;
+  const grid = new Map<number, number[]>();
+  const segs: number[] = [];
+  for (const [kind, width, flat] of city.roads) {
+    if (kind >= 10) continue;
+    for (let k = 3; k < flat.length; k += 3) {
+      const ax = dq(flat[k - 3]);
+      const az = dq(flat[k - 2]);
+      const bx = dq(flat[k]);
+      const bz = dq(flat[k + 1]);
+      const id = segs.length;
+      segs.push(ax, az, bx, bz, width / 2);
+      const r = width / 2 + 1;
+      for (let cx = Math.floor((Math.min(ax, bx) - r) / cell); cx <= Math.floor((Math.max(ax, bx) + r) / cell); cx++)
+        for (let cz = Math.floor((Math.min(az, bz) - r) / cell); cz <= Math.floor((Math.max(az, bz) + r) / cell); cz++) {
+          const key = cx * 100000 + cz;
+          let a = grid.get(key);
+          if (!a) grid.set(key, (a = []));
+          a.push(id);
+        }
+    }
+  }
+  const onStreet = (x: number, z: number) => {
+    for (const id of grid.get(Math.floor(x / cell) * 100000 + Math.floor(z / cell)) ?? []) {
+      const ax = segs[id];
+      const az = segs[id + 1];
+      const sx = segs[id + 2] - ax;
+      const sz = segs[id + 3] - az;
+      const t = Math.max(0, Math.min(1, ((x - ax) * sx + (z - az) * sz) / (sx * sx + sz * sz || 1)));
+      if (Math.hypot(ax + sx * t - x, az + sz * t - z) < segs[id + 4] - 0.2) return true;
+    }
+    return false;
+  };
+  const out: number[] = [];
   for (let k = 0; k < city.trees.length; k += 3) {
     const x = dq(city.trees[k]);
     const z = dq(city.trees[k + 1]);
+    let s = city.trees[k + 2] / 100;
+    if (onStreet(x, z)) continue;
+    if (decks) {
+      const ground = terrain ? terrain.height(x, z) : 0;
+      let fit = s;
+      for (const h of decks.at(x, z, CROWN_R * s, BARRIER_WIDTH)) {
+        const outside = Math.abs(h.d - (h.bl + h.br) / 2) - (h.br - h.bl) / 2 - BARRIER_WIDTH;
+        // small enough to stay beside the deck, or (for elevated decks) low enough to stay under it
+        const beside = (outside - 0.3) / CROWN_R;
+        const under = h.y - GIRDER_DEPTH - ground > 4 ? (h.y - GIRDER_DEPTH - ground - 0.4) / CROWN_TOP : 0;
+        if (outside < 0.4 && under <= 0) fit = 0;
+        else fit = Math.min(fit, Math.max(beside, under));
+      }
+      if (fit < 0.5) continue;
+      s = fit;
+    }
+    out.push(x, z, s);
+  }
+  return out;
+}
+
+function buildTrees(city: CityFile, terrain: Terrain | null, decks?: DeckIndex): THREE.Object3D[] {
+  const chunkSize = 500;
+  const groups = new Map<string, number[]>();
+  const spots = placeTrees(city, terrain, decks);
+  for (let k = 0; k < spots.length; k += 3) {
+    const x = spots[k];
+    const z = spots[k + 1];
     const key = `${Math.floor(x / chunkSize)},${Math.floor(z / chunkSize)}`;
     let a = groups.get(key);
     if (!a) groups.set(key, (a = []));
-    a.push(x, z, city.trees[k + 2] / 100);
+    a.push(x, z, spots[k + 2]);
   }
   const trunkGeo = new THREE.CylinderGeometry(0.18, 0.28, 3.2, 5);
   trunkGeo.translate(0, 1.6, 0);

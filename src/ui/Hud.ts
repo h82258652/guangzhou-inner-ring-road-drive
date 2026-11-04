@@ -1,11 +1,25 @@
 /** Heads-up display: speedometer, speed limit, line badge, section, next exit, guidance, stats, toasts. */
 import type { LineId } from '../shared/types';
 
+/** Race information shown instead of the trip panels. */
+export interface RaceHudState {
+  rank: number;
+  total: number;
+  /** race clock (s); negative during the countdown */
+  clock: number;
+  remaining: number;
+  distance: number;
+  /** standings: name, gap to the player in metres (positive = ahead), finished */
+  board: { name: string; gap: number; me: boolean; color: number; finished: boolean }[];
+  warning: string | null;
+}
+
 export interface HudState {
   speedKmh: number;
   rpm: number;
   gear: number;
-  limit: number;
+  /** speed limit; null when limits do not apply (races) */
+  limit: number | null;
   line: LineId | null;
   onRamp: boolean;
   section: string;
@@ -17,6 +31,7 @@ export interface HudState {
   fps: number;
   lightsOn: boolean;
   camName: string;
+  race?: RaceHudState | null;
 }
 
 export class Hud {
@@ -33,7 +48,10 @@ export class Hud {
   private flashEl: HTMLDivElement;
   private signalsEl: HTMLDivElement;
   private fpsEl: HTMLDivElement;
+  private raceEl: HTMLDivElement;
+  private countEl: HTMLDivElement;
   private lastKey = '';
+  private lastCount = '';
   private blink = 0;
 
   constructor(root: HTMLElement) {
@@ -51,6 +69,8 @@ export class Hud {
       <div class="limit">60</div>
       <div class="signals"><span>◀</span><span>▶</span></div>
       <div class="speedo"><canvas width="420" height="420"></canvas></div>
+      <div class="racepanel hidden"></div>
+      <div class="countdown hidden"></div>
       <div class="fps"></div>`;
     root.appendChild(this.el);
     this.flashEl = document.createElement('div');
@@ -67,6 +87,8 @@ export class Hud {
     this.toastsEl = this.el.querySelector('.toasts') as HTMLDivElement;
     this.signalsEl = this.el.querySelector('.signals') as HTMLDivElement;
     this.fpsEl = this.el.querySelector('.fps') as HTMLDivElement;
+    this.raceEl = this.el.querySelector('.racepanel') as HTMLDivElement;
+    this.countEl = this.el.querySelector('.countdown') as HTMLDivElement;
   }
 
   show(on: boolean) {
@@ -88,8 +110,12 @@ export class Hud {
 
   update(s: HudState, dt: number) {
     this.drawSpeedo(s);
-    this.limitEl.textContent = String(s.limit);
-    this.limitEl.classList.toggle('over', s.speedKmh > s.limit * 1.1 + 1);
+    this.limitEl.classList.toggle('hidden', s.limit === null);
+    if (s.limit !== null) {
+      this.limitEl.textContent = String(s.limit);
+      this.limitEl.classList.toggle('over', s.speedKmh > s.limit * 1.1 + 1);
+    }
+    this.updateRace(s.race ?? null);
     const key = `${s.line}|${s.onRamp}|${s.section}`;
     if (key !== this.lastKey) {
       this.lastKey = key;
@@ -109,13 +135,43 @@ export class Hud {
       this.guideEl.style.display = 'block';
       this.guideEl.textContent = s.guidance;
     } else this.guideEl.style.display = 'none';
-    this.statsEl.innerHTML = s.stats;
+    if (!s.race) this.statsEl.innerHTML = s.stats;
     this.blink += dt;
     const on = Math.floor(this.blink * 2.6) % 2 === 0;
     const spans = this.signalsEl.querySelectorAll('span');
     spans[0].classList.toggle('on', (s.signal === -1 || s.hazard) && on);
     spans[1].classList.toggle('on', (s.signal === 1 || s.hazard) && on);
     this.fpsEl.textContent = `${Math.round(s.fps)} FPS · ${s.camName}${s.lightsOn ? ' · 大灯开' : ''}`;
+  }
+
+  /** Race panel (position, clock, distance to go), standings in place of the trip stats, countdown. */
+  private updateRace(r: RaceHudState | null) {
+    this.raceEl.classList.toggle('hidden', !r);
+    this.el.classList.toggle('racing', !!r);
+    if (!r) {
+      this.countEl.classList.add('hidden');
+      this.lastCount = '';
+      return;
+    }
+    const time = r.clock < 0 ? '0:00.0' : fmtClock(r.clock);
+    const togo = r.remaining >= 1000 ? `${(r.remaining / 1000).toFixed(2)} km` : `${Math.round(r.remaining)} m`;
+    const pct = Math.max(0, Math.min(100, (1 - r.remaining / r.distance) * 100));
+    this.raceEl.innerHTML = `<div class="pos"><b>${r.rank}</b><span>/${r.total}</span><small>名次</small></div><div class="info"><div class="clock">${time}</div><div class="togo">剩余 ${togo}</div><div class="bar"><div style="width:${pct.toFixed(1)}%"></div></div></div>${r.warning ? `<div class="warn">${escapeHtml(r.warning)}</div>` : ''}`;
+    this.statsEl.innerHTML = r.board
+      .map((b, k) => {
+        const gap = b.me ? '' : b.finished ? '完赛' : `${b.gap > 0 ? '+' : '−'}${Math.abs(b.gap) >= 1000 ? `${(Math.abs(b.gap) / 1000).toFixed(1)} km` : `${Math.round(Math.abs(b.gap))} m`}`;
+        const dot = `<i style="background:#${b.color.toString(16).padStart(6, '0')}"></i>`;
+        return `<div class="standing${b.me ? ' me' : ''}"><span class="k">${k + 1}</span>${dot}<span class="n">${escapeHtml(b.name)}</span><span class="g">${gap}</span></div>`;
+      })
+      .join('');
+    const count = r.clock < 0 ? String(Math.ceil(-r.clock)) : r.clock < 1.2 ? 'GO!' : '';
+    if (count !== this.lastCount) {
+      this.lastCount = count;
+      this.countEl.textContent = count;
+      this.countEl.classList.toggle('hidden', !count);
+      this.countEl.classList.toggle('go', count === 'GO!');
+      if (count) this.countEl.animate([{ transform: 'translate(-50%, -50%) scale(1.6)', opacity: 0.2 }, { transform: 'translate(-50%, -50%) scale(1)', opacity: 1 }], { duration: 300, easing: 'ease-out' });
+    }
   }
 
   private drawSpeedo(s: HudState) {
@@ -130,7 +186,8 @@ export class Hud {
     g.fill();
     const a0 = Math.PI * 0.75;
     const a1 = Math.PI * 2.25;
-    const maxV = 160;
+    // race cars are tuned for more than the city scale
+    const maxV = s.race ? 240 : 160;
     const ang = (v: number) => a0 + (a1 - a0) * Math.min(1, v / maxV);
     // rpm arc (inner)
     g.lineWidth = 10;
@@ -144,20 +201,23 @@ export class Hud {
     g.arc(c, c, c - 58, a0, a0 + (a1 - a0) * rpmF);
     g.stroke();
     // limit zone marker
-    g.strokeStyle = 'rgba(255,60,60,0.85)';
-    g.lineWidth = 6;
-    g.beginPath();
-    g.arc(c, c, c - 22, ang(s.limit), ang(maxV));
-    g.stroke();
+    if (s.limit !== null) {
+      g.strokeStyle = 'rgba(255,60,60,0.85)';
+      g.lineWidth = 6;
+      g.beginPath();
+      g.arc(c, c, c - 22, ang(s.limit), ang(maxV));
+      g.stroke();
+    }
     // ticks
     g.strokeStyle = '#dfe6ec';
     g.fillStyle = '#dfe6ec';
     g.font = 'bold 22px sans-serif';
     g.textAlign = 'center';
     g.textBaseline = 'middle';
-    for (let v = 0; v <= maxV; v += 10) {
+    const step = maxV > 160 ? 20 : 10;
+    for (let v = 0; v <= maxV; v += step) {
       const a = ang(v);
-      const major = v % 20 === 0;
+      const major = v % (step * 2) === 0;
       const r0 = c - (major ? 34 : 28);
       g.lineWidth = major ? 4 : 2;
       g.beginPath();
@@ -189,6 +249,13 @@ export class Hud {
     g.fillStyle = '#ffd34d';
     g.fillText(s.gear === -1 ? 'R' : s.gear === 0 ? 'N' : `D${s.gear}`, c, c - 64);
   }
+}
+
+function fmtClock(t: number) {
+  // round first, so that 59.97 s shows as 1:00.0 rather than 0:60.0
+  const tenths = Math.round(t * 10);
+  const m = Math.floor(tenths / 600);
+  return `${m}:${((tenths - m * 600) / 10).toFixed(1).padStart(4, '0')}`;
 }
 
 export function escapeHtml(s: string) {

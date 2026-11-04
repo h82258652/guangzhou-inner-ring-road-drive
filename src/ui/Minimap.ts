@@ -76,7 +76,7 @@ export class Minimap {
     this.el.classList.toggle('big', this.big);
   }
 
-  draw(px: number, pz: number, heading: number, line: LineId | null, target?: { x: number; z: number } | null) {
+  draw(px: number, pz: number, heading: number, line: LineId | null, target?: { x: number; z: number } | null, others: { x: number; z: number; color: number }[] = []) {
     const g = this.g;
     const W = this.canvas.width;
     g.setTransform(1, 0, 0, 1, 0, 0);
@@ -126,6 +126,16 @@ export class Minimap {
       g.lineWidth = 5 / scale;
       g.beginPath();
       g.arc(target.x, target.z, 18 / scale, 0, Math.PI * 2);
+      g.stroke();
+    }
+    // race opponents
+    g.strokeStyle = '#000';
+    g.lineWidth = 2 / scale;
+    for (const o of others) {
+      g.fillStyle = `#${o.color.toString(16).padStart(6, '0')}`;
+      g.beginPath();
+      g.arc(o.x, o.z, (this.big ? 9 : 8) / scale, 0, Math.PI * 2);
+      g.fill();
       g.stroke();
     }
     // player

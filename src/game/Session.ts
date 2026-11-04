@@ -1,12 +1,12 @@
 /**
- * A driving session: modes (free / trip / lap), traffic-rule enforcement
+ * A driving session: modes (free / trip / lap / race), traffic-rule enforcement
  * (fixed & average-speed cameras, gore-area crossing, lane changes without
- * indicator, barrier collisions, reversing on the viaduct), navigation and
- * statistics.
+ * indicator, barrier collisions, reversing on the viaduct — all suspended in
+ * races), navigation and statistics.
  */
 import type { Edge, RoadNetwork } from '../road/Network';
 import type { GameOptions } from '../core/Settings';
-import type { ExitFile, LineId } from '../shared/types';
+import type { CameraFile, ExitFile, LineId } from '../shared/types';
 
 export interface Violation {
   kind: string;
@@ -48,9 +48,11 @@ export class Session {
   missed = false;
   ended = false;
 
+  /** @param cameras the enforcement cameras actually standing in the scene */
   constructor(
     readonly net: RoadNetwork,
     readonly options: GameOptions,
+    readonly cameras: CameraFile[] = net.cameras,
   ) {
     this.line = options.line;
     if (options.mode === 'trip') this.destination = net.exits.find((x) => x.line === options.line && x.code === options.destination) ?? null;
@@ -62,7 +64,13 @@ export class Session {
     if (this.signal) this.lastSignalT = this.t;
   }
 
+  /** traffic rules are enforced in every mode except races */
+  get rules() {
+    return this.options.mode !== 'race';
+  }
+
   private violate(kind: string, text: string, ev: SessionEvent[]) {
+    if (!this.rules) return;
     this.violations.push({ kind, text, t: this.t });
     ev.push({ type: 'toast', text, kind: 'bad' });
   }
@@ -144,7 +152,7 @@ export class Session {
         if (delta < -L / 2) delta += L;
         if (Math.abs(delta) < 60) {
           this.lapProgress += delta;
-          if (delta > 0) this.checkCameras(e.line, this.prevLineS, delta, v, p, ev);
+          if (delta > 0 && this.rules) this.checkCameras(e.line, this.prevLineS, delta, v, p, ev);
         }
       } else this.lapStartT = this.t;
       this.prevLineS = ls;
@@ -189,7 +197,7 @@ export class Session {
 
   private checkCameras(line: LineId, s0: number, delta: number, v: number, _p: { edge: Edge; s: number }, ev: SessionEvent[]) {
     const L = this.net.lines[line].length;
-    for (const c of this.net.cameras) {
+    for (const c of this.cameras) {
       if (c.line !== line) continue;
       const rel = (((c.lineS - s0) % L) + L) % L;
       if (rel <= 0 || rel > delta) continue;
@@ -284,7 +292,7 @@ export class Session {
 }
 
 export function fmtTime(t: number) {
-  const m = Math.floor(t / 60);
-  const s = t - m * 60;
-  return `${m}:${s.toFixed(1).padStart(4, '0')}`;
+  const tenths = Math.round(t * 10);
+  const m = Math.floor(tenths / 600);
+  return `${m}:${((tenths - m * 600) / 10).toFixed(1).padStart(4, '0')}`;
 }

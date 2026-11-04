@@ -66,6 +66,11 @@ export const SUV: VehicleSpec = {
   halfLength: 2.4,
 };
 
+/** Race-mode tune: more power and grip, stronger brakes. */
+export function raceTune(spec: VehicleSpec): VehicleSpec {
+  return { ...spec, peakTorque: spec.peakTorque * 1.5, mu: spec.mu * 1.05, brakeForce: spec.brakeForce * 1.1, dragCoef: spec.dragCoef * 0.95 };
+}
+
 export interface Controls {
   throttle: number; // 0..1
   brake: number; // 0..1

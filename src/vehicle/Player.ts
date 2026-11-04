@@ -33,6 +33,11 @@ export class Player {
   private blink = 0;
   interior: THREE.Group;
 
+  /**
+   * opts.visual = false builds physics only (no meshes, textures or lights; for
+   * tests); opts.headlight / opts.interior = false leave out the spot light and
+   * the cockpit (AI-driven cars).
+   */
   constructor(
     readonly net: RoadNetwork,
     spec: VehicleSpec,
@@ -40,47 +45,56 @@ export class Player {
     paint: number,
     edge: Edge,
     s: number,
+    opts: { visual?: boolean; headlight?: boolean; interior?: boolean } = {},
   ) {
     this.dyn = new VehicleDynamics(spec);
     this.tracker = new RoadTracker(net, edge, s);
-    const geo = buildVehicleGeometry(VEHICLES[kind]);
-    this.halfLength = geo.params.length / 2;
-    this.halfWidth = geo.params.width / 2;
-    const paintMat = new THREE.MeshPhysicalMaterial({ color: paint, roughness: 0.32, metalness: 0.55, clearcoat: 1, clearcoatRoughness: 0.08 });
-    const trimMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.35, metalness: 0.4 });
+    const params = VEHICLES[kind];
+    this.halfLength = params.length / 2;
+    this.halfWidth = params.width / 2;
     this.headMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.85, 0.85, 0.8), toneMapped: false });
     this.tailMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.45, 0.02, 0.02), toneMapped: false });
     const p = randomPlate(Math.floor(Math.random() * 1e6));
     this.plate = p.text;
-    const c = document.createElement('canvas');
-    c.width = 256;
-    c.height = 80;
-    drawPlate(c.getContext('2d')!, 0, 0, 256, 80, p.text, p.green);
-    const plateTex = new THREE.CanvasTexture(c);
-    plateTex.colorSpace = THREE.SRGBColorSpace;
-    const plateMat = new THREE.MeshBasicMaterial({ map: plateTex });
-    const meshes: [THREE.BufferGeometry, THREE.Material][] = [
-      [geo.body, paintMat],
-      [geo.trim, trimMat],
-      [geo.head, this.headMat],
-      [geo.tail, this.tailMat],
-      [geo.plate, plateMat],
-    ];
-    for (const [g, m] of meshes) {
-      const mesh = new THREE.Mesh(g, m);
-      mesh.castShadow = m === paintMat || m === trimMat;
-      mesh.receiveShadow = true;
-      this.body.add(mesh);
-    }
-    this.group.add(this.body);
-    this.body.add(new THREE.Mesh(geo.ind, this.signal3.material));
-    this.interior = buildInterior(geo.params.width);
-    this.interior.visible = false;
-    this.body.add(this.interior);
     this.headlight = new THREE.SpotLight(0xfff4e0, 0, 140, 0.52, 0.45, 1.4);
-    this.headlight.position.set(2.0, 0.75, 0);
-    this.headlight.target.position.set(30, -1.5, 0);
-    this.group.add(this.headlight, this.headlight.target);
+    this.interior = new THREE.Group();
+    this.group.add(this.body);
+    if (opts.visual !== false) {
+      const geo = buildVehicleGeometry(params);
+      const paintMat = new THREE.MeshPhysicalMaterial({ color: paint, roughness: 0.32, metalness: 0.55, clearcoat: 1, clearcoatRoughness: 0.08 });
+      const trimMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.35, metalness: 0.4 });
+      const c = document.createElement('canvas');
+      c.width = 256;
+      c.height = 80;
+      drawPlate(c.getContext('2d')!, 0, 0, 256, 80, p.text, p.green);
+      const plateTex = new THREE.CanvasTexture(c);
+      plateTex.colorSpace = THREE.SRGBColorSpace;
+      const plateMat = new THREE.MeshBasicMaterial({ map: plateTex });
+      const meshes: [THREE.BufferGeometry, THREE.Material][] = [
+        [geo.body, paintMat],
+        [geo.trim, trimMat],
+        [geo.head, this.headMat],
+        [geo.tail, this.tailMat],
+        [geo.plate, plateMat],
+      ];
+      for (const [g, m] of meshes) {
+        const mesh = new THREE.Mesh(g, m);
+        mesh.castShadow = m === paintMat || m === trimMat;
+        mesh.receiveShadow = true;
+        this.body.add(mesh);
+      }
+      this.body.add(new THREE.Mesh(geo.ind, this.signal3.material));
+      if (opts.interior !== false) {
+        this.interior = buildInterior(params.width);
+        this.interior.visible = false;
+        this.body.add(this.interior);
+      }
+      if (opts.headlight !== false) {
+        this.headlight.position.set(2.0, 0.75, 0);
+        this.headlight.target.position.set(30, -1.5, 0);
+        this.group.add(this.headlight, this.headlight.target);
+      }
+    }
     this.placeAt(edge, s, 0, 0);
   }
 

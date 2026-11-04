@@ -8,9 +8,14 @@
 import * as THREE from 'three';
 import type { Edge, RoadNetwork } from '../road/Network';
 import { newFrame } from '../road/Network';
-import type { ExitFile, LineId, SignFile } from '../shared/types';
+import type { DeckIndex } from '../road/Clearance';
+import type { CameraFile, ExitFile, LineId, SignFile } from '../shared/types';
+import { type CantileverLayout, type GantryLayout, layoutCantilever, layoutGantry, layoutPole, layoutUnderDeck, type PoleLayout, shifts } from './SignLayout';
 
 const FONT = '"Microsoft YaHei","PingFang SC","Noto Sans SC","Source Han Sans SC",sans-serif';
+/** top of the beam above the deck: guide sign gantries / variable message signs */
+const GANTRY_TOP = 9.65;
+const VMS_TOP = 9.05;
 const GREEN = '#0b6e3c';
 const EXPRESS_RE = /高架|放射线|高速|快速|隧道|大桥|内环/;
 
@@ -28,54 +33,100 @@ export class Signs {
   private metal = new THREE.MeshStandardMaterial({ color: 0x9aa2a8, metalness: 0.7, roughness: 0.4 });
   private back = new THREE.MeshStandardMaterial({ color: 0x6d7378, metalness: 0.5, roughness: 0.6 });
   private placeholder = new THREE.MeshStandardMaterial({ color: 0x0b5e34, roughness: 0.6 });
+  /** signs that found no clear spot for their supports and were left out */
+  readonly skipped: SignFile[] = [];
+  /** enforcement cameras that are actually in the scene (only those may flash) */
+  readonly cameras: CameraFile[] = [];
   vmsText: (line: LineId | null) => string[] = () => ['内环路 畅通', '保持车距 安全驾驶'];
 
-  constructor(readonly net: RoadNetwork) {
+  constructor(
+    readonly net: RoadNetwork,
+    readonly decks: DeckIndex,
+  ) {
     this.group.name = 'signs';
-    const f = newFrame();
     for (const s of net.signs) {
-      const e = net.edges[s.edge];
-      if (!e) continue;
-      const inst = this.create(s, e, f);
+      if (!net.edges[s.edge]) continue;
+      const inst = this.create(s);
       if (inst) {
         this.items.push(inst);
         this.group.add(inst.group);
-      }
+      } else this.skipped.push(s);
     }
     for (const c of net.cameras) {
       const e = net.edges[c.edge];
       if (!e) continue;
-      const kind = c.kind;
-      const inst = this.createCameraGantry(e, c.s, kind, f);
+      const inst = this.createCameraGantry(e, c.s, c.kind);
+      if (!inst) continue;
+      this.cameras.push(c);
       this.items.push(inst);
       this.group.add(inst.group);
     }
   }
 
-  /** Enforcement camera gantry (电子警察 / 测速) with one camera per lane. */
-  private createCameraGantry(e: Edge, s: number, kind: 'fixed' | 'section-start' | 'section-end', f: ReturnType<typeof newFrame>): SignInstance {
-    s = Math.max(0, Math.min(e.length, s));
-    e.frame(s, 0, f);
-    const i = e.idx(s);
+  /** Group placed in the road frame of a layout: +X along the road, +Z to the right. */
+  private framed(edge: Edge, s: number, y: number) {
+    const f = edge.frame(s, 0, newFrame());
     const g = new THREE.Group();
-    g.position.set(f.x, e.y[i], f.z);
+    g.position.set(f.x, y, f.z);
     g.rotation.y = -Math.atan2(f.tz, f.tx);
-    const left = e.bl[i] - 0.9;
-    const right = e.br[i] + 0.9;
-    const H = 6.6;
-    for (const z of [left, right]) {
-      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.22, H, 8), this.metal);
-      post.position.set(0.3, H / 2, z);
+    return g;
+  }
+
+  /** Two posts on the outer barriers (feet on their decks) and a beam at `top`. */
+  private gantryFrame(g: THREE.Group, L: GantryLayout, top: number, beam: [number, number], postR: [number, number], x = 0.3) {
+    for (const p of [L.left, L.right]) {
+      const h = top + beam[1] / 2 - (p.base - L.y);
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(postR[0], postR[1], h, 8), this.metal);
+      post.position.set(x, p.base - L.y + h / 2, p.d);
       g.add(post);
     }
-    const beam = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.35, right - left), this.metal);
-    beam.position.set(0.3, H, (left + right) / 2);
-    g.add(beam);
+    const span = L.right.d - L.left.d;
+    const bm = new THREE.Mesh(new THREE.BoxGeometry(beam[0], beam[1], span + 0.3), this.metal);
+    bm.position.set(x, top, (L.left.d + L.right.d) / 2);
+    g.add(bm);
+  }
+
+  /** Single post with an arm over the road at `top` (beam centre height). */
+  private cantileverFrame(g: THREE.Group, L: CantileverLayout, top: number, x = 0.3) {
+    const h = top + 0.35;
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.28, h, 8), this.metal);
+    post.position.set(x, h / 2, L.post.d);
+    g.add(post);
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.55, L.reach + 0.3), this.metal);
+    arm.position.set(x, top, L.post.d - (L.side * L.reach) / 2);
+    g.add(arm);
+  }
+
+  /**
+   * Enforcement camera gantry (电子警察 / 测速) with one camera per lane; under
+   * an upper deck the cameras hang from its underside instead.
+   */
+  private createCameraGantry(edge: Edge, s0: number, kind: 'fixed' | 'section-start' | 'section-end'): SignInstance | null {
+    const tries = shifts(6, 42, 42);
+    const L =
+      layoutGantry(this.net, this.decks, edge, s0, 6.8, tries) ??
+      layoutCantilever(this.net, this.decks, edge, s0, 6.8, 2.3, 1, tries, 4, 9) ??
+      layoutUnderDeck(this.net, this.decks, edge, s0, tries);
+    if (!L) return null;
+    const { edge: e, s } = L;
+    const i = e.idx(s);
+    const g = this.framed(e, s, L.y);
+    const right = e.brAt(s) + 0.9;
+    if ('left' in L) this.gantryFrame(g, L, 6.6, [0.35, 0.35], [0.18, 0.22]);
+    else if ('reach' in L) this.cantileverFrame(g, L, 6.6);
+    // per lane: camera height under the beam, or just below the deck above (null: no camera over that lane)
+    const mount = (k: number, z: number): number | null => {
+      if ('ceilings' in L) return L.ceilings[k] === null ? null : L.ceilings[k]! - 0.15;
+      if ('reach' in L && !(L.side > 0 ? z > L.post.d - L.reach + 0.4 : z < L.post.d + L.reach - 0.4)) return null;
+      return 6.6;
+    };
     const camMat = new THREE.MeshStandardMaterial({ color: 0xe9ecef, roughness: 0.5 });
     const lensMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.2, metalness: 0.5 });
     const lanes = Math.max(1, Math.round(e.lanes[i]));
     for (let k = 0; k < lanes; k++) {
       const z = e.laneCenter(s, k);
+      const H = mount(k, z);
+      if (H === null) continue;
       const body = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.32, 0.34), camMat);
       body.position.set(0.0, H - 0.4, z);
       const lens = new THREE.Mesh(new THREE.CircleGeometry(0.11, 12), lensMat);
@@ -84,9 +135,16 @@ export class Signs {
       const flash = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 0.5), camMat);
       flash.position.set(0.05, H - 0.4, z + 0.7);
       g.add(body, lens, flash);
+      if ('ceilings' in L) {
+        // bracket up to the deck above
+        const bracket = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.4, 0.1), this.metal);
+        bracket.position.set(0.1, H - 0.05, z);
+        g.add(bracket);
+      }
     }
     const faces: SignInstance['faces'] = [];
-    if (kind !== 'fixed') {
+    const H = 6.6;
+    if (kind !== 'fixed' && !('ceilings' in L) && mount(0, right - 3.9) !== null) {
       const w = 3.4;
       const h = 1.5;
       const geo = new THREE.PlaneGeometry(w, h);
@@ -113,18 +171,46 @@ export class Signs {
     return this.net.exits.find((x) => x.line === spec.line && x.code === spec.exitCode);
   }
 
-  private create(spec: SignFile, e: Edge, f: ReturnType<typeof newFrame>): SignInstance | null {
-    const s = Math.max(0, Math.min(e.length, spec.s));
-    e.frame(s, 0, f);
-    const i = e.idx(s);
-    const y = e.y[i];
-    const heading = Math.atan2(f.tz, f.tx);
-    const g = new THREE.Group();
-    g.position.set(f.x, y, f.z);
+  /** Where a sign's supports go (null: no clear spot nearby, the sign is left out). */
+  layout(spec: SignFile): GantryLayout | CantileverLayout | PoleLayout | null {
+    const e = this.net.edges[spec.edge];
+    const s = spec.s;
+    // a full gantry if there is room for it, otherwise a cantilever from the barrier on the sign's side
+    const overhead = (top: number, tries: number[], prefer: -1 | 1, minReach: number, maxReach: number) =>
+      layoutGantry(this.net, this.decks, e, s, top, tries) ?? layoutCantilever(this.net, this.decks, e, s, top, 4.1, prefer, tries, minReach, maxReach);
+    const exitSide = (): -1 | 1 => (this.exitInfo(spec)?.side === 'left' ? -1 : 1);
+    switch (spec.kind) {
+      case 'exit-advance':
+        return overhead(GANTRY_TOP, shifts(10, 120, 150), exitSide(), 5, 8.6);
+      case 'exit-now':
+        // keep it upstream of the diverge: the panel announces the exit lane
+        return overhead(GANTRY_TOP, shifts(10, 20, 160), exitSide(), 5, 8.6);
+      case 'confirm':
+        return overhead(GANTRY_TOP, shifts(15, 220, 60, true), 1, 5, 7.4);
+      case 'vms':
+        return overhead(VMS_TOP, shifts(20, 240, 240, true), 1, 6, 9.4);
+      case 'speed':
+        return layoutPole(this.net, this.decks, e, s, 3.2, 1, shifts(10, 80, 50, true));
+      case 'camera':
+        return layoutPole(this.net, this.decks, e, s, 3.3, 1, shifts(10, 40, 100));
+      case 'exit-gore': {
+        const x = this.exitInfo(spec);
+        // on the ramp, after the gore nose: on the barrier facing away from the main line
+        return x ? layoutPole(this.net, this.decks, e, s, 3.5, x.side === 'right' ? 1 : -1, shifts(10, 80, 70, true), 1.35) : null;
+      }
+      default:
+        return null;
+    }
+  }
+
+  private create(spec: SignFile): SignInstance | null {
+    const L = this.layout(spec);
+    if (!L) return null;
+    const { edge: e, s, y } = L;
     // local frame: +X along the road, +Z to the right; sign faces -X (towards drivers)
-    g.rotation.y = -heading;
-    const bl = e.bl[i];
-    const br = e.br[i];
+    const g = this.framed(e, s, y);
+    const bl = e.blAt(s);
+    const br = e.brAt(s);
     const faces: SignInstance['faces'] = [];
     const panel = (w: number, h: number, z: number, yC: number, draw: SignInstance['faces'][number]['draw']) => {
       const geo = new THREE.PlaneGeometry(w, h);
@@ -138,17 +224,22 @@ export class Signs {
       faces.push({ mesh, draw, w, h });
     };
     const gantry = (beamY: number) => {
-      const left = bl - 0.9;
-      const right = br + 0.9;
-      for (const z of [left, right]) {
-        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.26, beamY + 0.6, 8), this.metal);
-        post.position.set(0.3, (beamY + 0.6) / 2, z);
-        g.add(post);
-      }
-      const beam = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.7, right - left + 0.4), this.metal);
-      beam.position.set(0.3, beamY + 0.3, (left + right) / 2);
-      g.add(beam);
-      return { left, right };
+      if ('left' in L) this.gantryFrame(g, L, beamY + 0.3, [0.5, 0.7], [0.22, 0.26]);
+      else if ('reach' in L) this.cantileverFrame(g, L, beamY + 0.3);
+    };
+    /** panel width and lateral position: as designed on a gantry, shrunk to the arm next to its post on a cantilever */
+    const fit = (w: number, z: number): [number, number] => {
+      if (!('reach' in L)) return [w, z];
+      const w2 = Math.min(w, L.reach - 0.3);
+      return [w2, L.post.d - L.side * (w2 / 2 + 0.08)];
+    };
+    const pole = (height: number) => {
+      if (!('post' in L)) return 0;
+      // behind the panel, not through its face
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, height, 6), this.metal);
+      post.position.set(0.2, height / 2, L.post.d);
+      g.add(post);
+      return L.post.d;
     };
     const line = spec.line;
     switch (spec.kind) {
@@ -157,14 +248,13 @@ export class Signs {
         const x = this.exitInfo(spec);
         if (!x) return null;
         gantry(9.0);
-        const w = 8.2;
-        const h = 3.6;
         const right = x.side === 'right';
-        const z = right ? br - w / 2 + 0.3 : bl + w / 2 - 0.3;
+        const [w, z] = fit(8.2, right ? br - 8.2 / 2 + 0.3 : bl + 8.2 / 2 - 0.3);
+        const h = (3.6 * w) / 8.2;
         const now = spec.kind === 'exit-now';
         panel(w, h, z, 9.0 - h / 2 + 0.25, (g2, W, H) => drawExitSign(g2, W, H, x, now ? null : spec.distanceText ?? '', right));
-        // lane guidance panel over the through lanes
-        if (now) {
+        // lane guidance panel over the through lanes (gantries only)
+        if (now && 'left' in L) {
           const z2 = right ? bl + 3.2 : br - 3.2;
           panel(5.4, 2.6, z2, 9.0 - 1.05, (g2, W, H) => drawThroughSign(g2, W, H, x.line, right));
         }
@@ -173,10 +263,7 @@ export class Signs {
       case 'exit-gore': {
         const x = this.exitInfo(spec);
         if (!x) return null;
-        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 3.2, 6), this.metal);
-        const z = x.side === 'right' ? br + 0.7 : bl - 0.7;
-        post.position.set(0, 1.6, z);
-        g.add(post);
+        const z = pole(3.2);
         panel(2.6, 1.3, z, 3.5, (g2, W, H) => drawGoreSign(g2, W, H, x));
         break;
       }
@@ -184,34 +271,36 @@ export class Signs {
         gantry(9.0);
         const lineName = line ?? 'A';
         const next = this.upcomingExits(lineName, e, s, 2);
-        panel(7.0, 3.3, br - 3.8, 9.0 - 1.4, (g2, W, H) => drawConfirmSign(g2, W, H, lineName, next));
+        const [w, z] = fit(7.0, br - 3.8);
+        const h = (3.3 * w) / 7.0;
+        panel(w, h, z, 9.25 - h / 2, (g2, W, H) => drawConfirmSign(g2, W, H, lineName, next));
         break;
       }
       case 'speed': {
-        const z = br + 0.75;
-        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 3.4, 6), this.metal);
-        post.position.set(0, 1.7, z);
-        g.add(post);
+        const z = pole(3.4);
         const disc = new THREE.CircleGeometry(0.62, 32);
         disc.rotateY(-Math.PI / 2);
         const mesh = new THREE.Mesh(disc, this.placeholder);
         mesh.position.set(-0.02, 3.2, z);
-        g.add(mesh);
+        const backDisc = new THREE.CircleGeometry(0.62, 32);
+        backDisc.rotateY(Math.PI / 2);
+        const backMesh = new THREE.Mesh(backDisc, this.back);
+        backMesh.position.set(0.12, 3.2, z);
+        g.add(mesh, backMesh);
         const speed = spec.speed ?? 60;
         faces.push({ mesh, w: 1.24, h: 1.24, draw: (g2, W, H) => drawSpeedSign(g2, W, H, speed) });
         break;
       }
       case 'camera': {
-        const z = br + 0.75;
-        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 3.4, 6), this.metal);
-        post.position.set(0, 1.7, z);
-        g.add(post);
+        const z = pole(3.4);
         panel(1.9, 1.25, z, 3.3, (g2, W, H) => drawCameraSign(g2, W, H));
         break;
       }
       case 'vms': {
         gantry(8.4);
-        panel(9, 2.4, (bl + br) / 2, 8.4 - 0.95, (g2, W, H) => drawVms(g2, W, H, this.vmsText(line)));
+        const [w, z] = fit(9, (bl + br) / 2);
+        const h = (2.4 * w) / 9;
+        panel(w, h, z, 8.65 - h / 2, (g2, W, H) => drawVms(g2, W, H, this.vmsText(line)));
         break;
       }
       default:
