@@ -4,6 +4,8 @@ A web game for driving at Guangzhou Inner Ring Road — 一个在浏览器里驾
 道路、匝道、高架层次、沿线街道与建筑均由 **OpenStreetMap 真实数据** 生成，**A线（逆时针）** 与
 **B线（顺时针）** 全线约 23.4 km 都可以驾驶，包括全部出入口匝道。
 
+**[▶ 在线试玩](https://h82258652.github.io/guangzhou-inner-ring-road-drive/)**（GitHub Pages，`main` 分支更新后自动部署）
+
 ## 特性
 
 - **真实线形**：从 OSM 追踪出内环路两条闭合主线及 70+ 条出入口匝道（含**左侧出入口**、双层高架段、
@@ -54,6 +56,13 @@ npm run e2e        # Playwright 浏览器冒烟测试（加载城市、开始驾
 
 `npm run e2e` 默认使用 Playwright 自带的 Chromium（先执行 `npx playwright install chromium`）；
 也可以设置 `PW_CHANNEL=msedge`（或 `chrome`）直接使用本机已安装的浏览器。
+
+## 部署（GitHub Pages）
+
+推送到 `main` 后，[`.github/workflows/deploy-pages.yml`](.github/workflows/deploy-pages.yml) 会执行 `npm ci` 与
+`npm run build`，并把 `dist/` 发布到 GitHub Pages；也可以在仓库的 Actions 页面手动运行这个工作流。
+构建产物使用相对路径（`vite.config.ts` 中的 `base: './'`），部署在 `https://<用户名>.github.io/<仓库名>/`
+这样的子路径下无需修改配置。Fork 后，在仓库 **Settings → Pages** 中把 **Source** 设为 **GitHub Actions** 即可启用。
 
 ## 操作
 
@@ -108,6 +117,7 @@ src/ui/           HUD、小地图、菜单、触屏
 src/audio/        合成音效
 tests/            Vitest 测试（整圈自动驾驶、匝道车流、竞速、防穿模校验、车牌朝向）
 e2e/              Playwright 浏览器冒烟测试（自由驾驶与竞速模式）
+.github/          GitHub Pages 自动部署工作流
 ```
 
 ## 许可与署名
